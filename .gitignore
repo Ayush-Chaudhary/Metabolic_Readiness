@@ -5,3 +5,8 @@ simon/
 .vscode/
 # Ignore Python cache files
 __pycache__/
+# Credentials — never commit
+.env
+testing_tool/.env
+# Excel test logs (generated at runtime)
+testing_tool/test_log.xlsx
