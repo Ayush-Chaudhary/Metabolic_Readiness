@@ -1,0 +1,7 @@
+
+.databricks
+databricks.yml
+simon/
+.vscode/
+# Ignore Python cache files
+__pycache__/

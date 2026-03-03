@@ -1,0 +1,94 @@
+Healthy Habits Daily Rating Scores and Labels,,,,
+Only the Label and Description would be shown to the user. Score would NOT be shown.,,,,
+Score,Label,Description,,
+81-100%,Committed,You are committed to your healthy habits and seeing results.,,
+61-80%,Strong,Your healthy habits are solid and dependable. ,,
+41-60%,Consistent,You are making a great effort to make your healthy habits a routine. ,,
+21-40%,Building,You are working to create new healthy habits.,,
+1-20%,Ready,You are ready to choose your next healthy steps.,,
+,,,,
+,,,,
+Category,Category Total,Category Criteria,Qualifying Event,Point Value
+Weight,5,"Include if user has no focus set.
+
+If user has focus set, include if Weight is a focus area.","If weight loss goal, weight decreased by more than 1 lb in last 14 days",5
+,,,"If weight loss goal, weight stayed within +/- 1 lbs in last 14 days",3
+,,,"If weight loss goal, weight gained by at least 1 lb in last 14 days",0
+,,,"If maintenance goal, weight stayed with +/- 3% of goal weight in last 14 days",5
+,,,"If maintenance goal, weight gained more than 3% of goal weight in last 14 days",0
+,,,"If maintenance goal, lost more than 3% of goal weight in last 14 days",0
+,,,"If no weight goal, weight logged once in last 7 days",5
+,,,"If no weight goal, weight logged once in last 14 days",3
+,,,"If no weight goal, weight logged once in last 30 days",1
+Glucose (CGM),5,"Include if user has CGM connected AND
+
+Include if user has no focus set.
+
+If user has focus set, include if Glucose is a focus area.","For AIC target <7, TIR was at least 70% yesterday",5
+,,,"For AIC target <7, TIR was at least 60% yesterday",3
+,,,"For AIC target <7, TIR was 50% or less yesterday",1
+,,,"For AIC target <8, TIR was at least 50% yesterday",5
+,,,"For AIC target <7, TIR was at least 40% yesterday",3
+,,,"For AIC target <7, TIR was 30% or less yesterday",1
+Activity,5,"Include if user has no focus set.
+
+If user has focus set, include if Activity is a focus area.",At least 150 minutes of physical activity logged in last 7 days,5
+,,,At least 120 minutes of phsyical activity logged in last 7 days,4
+,,,At least 90 minutes of physical activity logged in last 7 days,3
+,,,At least 60 minutes of physical activity logged in last 7 days,2
+,,,At least 30 minutes of physical activity loggedin last 7 days,1
+,,,No activity logged in last 7 days,0
+Steps,5,"Include if user has steps tracker connected AND
+
+Include if user has no focus set.
+
+If user has focus set, include if Actvity is a focus area.","At least 10,000 steps walked yesterday",5
+,,,"At least 6,000 steps walked yesterday",3
+,,,"At least 2,000 steps walked yesterday",1
+,,,No steps recorded for yesterday,0
+Food logging,5,"Include if user has no focus set.
+
+If user has focus set, include if Eating Habits are a focus area.",Logged food for at least 3 meals yesterday,5
+,,,Logged food for at least 2 meals yesterday,3
+,,,Logged for for at least 1 meal yesterday,1
+,,,No food logged yesterday ,0
+Daily nutrient targets,5,"Include if user has no focus set.
+
+If user has focus set, include if Eating Habits are a focus area.",Met 90-110% of 100% of all nutrient targets,5
+,,,Met at least 60% of all nutrient targets,3
+,,,Met at least 30% of all nutrient targets,1
+,,,No nutrient target set,0
+Sleep duration,5,"Include if user has no focus set.
+
+If user has focus set, include if Sleep is a focus area.",At least 7 hours of sleep logged yesterday,5
+,,,At least 6 hours of sleep logged yesterday,3
+,,,At least 5 hours of sleep logged yesterday,1
+,,,Less than 5 hours of sleep logged yesterday,0
+,,,No sleep logged yesterday,0
+Sleep rating,5,"Include if user has no focus set.
+
+If user has focus set, include if Sleep is a focus area.",Sleep rating of 10 logged yesterday,5
+,,,Sleep rating of at least 7 logged yesterday,3
+,,,Sleep rating of at least 4 logged yesterday,1
+,,,Sleep rating of 3 or less logged yesterday,0
+,,,No sleep rating logged yesterday,0
+Medications,5,"Include if user has no focus set.
+
+If user has focus set, include if Medications are a focus area.",Took 100% of medications as prescribed in last 7 days,5
+,,,Took at least 75% of medications as prescribed in last 7 days,3
+,,,Took at least 50% of medications as prescribed in last 7 days,1
+,,,Took less than 50% of medications as prescribed in last 7 days,0
+Mental Well-being,5,"Include if user has no focus set.
+
+If user has focus set, include if Anxiety is a focus area.",Has an active Action Plan,3
+,,,Journaled at least once in last 7 days,1
+,,,Opened at least 1 meditation within last 7 days,1
+Total Points Available,50,,,
+,,,,
+Bonus Points,N/A,Include if user completes a qualifying event,User completed an exercise video,3
+,,,User generated an AI meal plan,1
+,,,User started an exercise program,1
+,,,User shopped for groceries online,1
+,,,User read an article,1
+,,,User completed a lesson,1
+,,,User watched a Learn video,1

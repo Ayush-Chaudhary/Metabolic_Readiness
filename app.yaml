@@ -1,0 +1,25 @@
+# Databricks App configuration — Metabolic Readiness Clinical Testing Tool
+# Source root is the project root so logic_engine.py / insight_generator.py / prompts.yml are on the path.
+#
+# Deploy after bundle sync:
+#   databricks bundle deploy
+#   databricks apps deploy metabolic-readiness-tester \
+#     --source-code-path /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+
+command:
+  - "sh"
+  - "-c"
+  - "streamlit run testing_tool/app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true"
+
+env:
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"
+
+# Declaring the serving endpoint here causes Databricks to automatically grant
+# the App's managed service principal CAN_QUERY permission on the endpoint.
+resources:
+  - name: llm-endpoint
+    type: serving_endpoint
+    endpoint_name: llama-3-3-70b

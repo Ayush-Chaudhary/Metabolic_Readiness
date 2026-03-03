@@ -1,0 +1,24 @@
+# Databricks App configuration for the Clinical Testing Tool
+# Deploy with: databricks apps deploy --app-name metabolic-readiness-tester
+
+command:
+  - "streamlit"
+  - "run"
+  - "app.py"
+  - "--server.port"
+  - "8501"
+  - "--server.address"
+  - "0.0.0.0"
+  - "--server.headless"
+  - "true"
+
+env:
+  - name: STREAMLIT_SERVER_ENABLE_CORS
+    value: "false"
+  - name: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+    value: "false"
+
+resources:
+  - name: llm-endpoint
+    type: serving_endpoint
+    endpoint_name: llama-3-3-70b
