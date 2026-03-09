@@ -36,6 +36,7 @@ CONFIG: Dict[str, Any] = {
         "sleep": "bronz_als_azdev24.trxdb_dsmbasedb_observation.sleepentry",
         "med_administration": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medadministration",
         "med_prescription": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescription",
+        "med_schedule": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescriptiondayschedule",
         "patient_nutrition_goals": "bronz_als_azuat2.trxdb_dsmbasedb_user.patientgoaldetails",
         "a1c_target": "bronz_als_azdev24.trxdb_dsmbasedb_observation.patienttargetsegment",
         "journal": "bronz_als_azdev24.trxdb_dsmbasedb_userengagement.userjournal",
@@ -46,6 +47,7 @@ CONFIG: Dict[str, Any] = {
         "journey": "bronz_als_azdev24.trxdb_dsmbasedb_user.GuidedJourneyWeeksAndTasksDetail",
         "exercise_video": "bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideositemdetail",
         "exercise_program": "bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideosprogramdetail",
+        "user_focus": "bronz_als_azdev24.trxdb_dsmbasedb_user.customizemyappdetails",
     },
     
     # Target Gold Layer
@@ -260,9 +262,9 @@ def create_a1c_target_features() -> DataFrame:
     a1c_latest = a1c_latest.withColumn(
         "a1c_target_group",
         mapping_expr[F.col("a1ctarget")]
-    ).withColumn(
-        "a1c_target_group",
-        F.coalesce(F.col("a1c_target_group"), F.lit("dm_target_7"))
+    # ).withColumn(
+    #     "a1c_target_group",
+    #     F.coalesce(F.col("a1c_target_group"), F.lit("dm_target_7"))
     )
     
     return a1c_latest.select("patientid", "a1c_target_group")
@@ -365,7 +367,7 @@ def create_activity_features() -> DataFrame:
     activity_df = add_local_date(activity_df, "observationdatetime")
     
     # Exclude meditation from activity metrics
-    physical_activity_df = activity_df.filter(F.col("exercisetype") != meditation_type)
+    physical_activity_df = activity_df#.filter(F.col("exercisetype") != meditation_type)
     
     # Calculate daily aggregations
     activity_daily = physical_activity_df.groupBy("patientid", "local_date").agg(
@@ -505,6 +507,11 @@ print("✓ Steps feature function created")
 def create_weight_features() -> DataFrame:
     """
     Calculates weight tracking metrics including logging frequency and goal progress.
+    Joins with the weightgoal table to add:
+    - has_weight_goal: bool
+    - weight_goal_type: "lose" | "gain" | "maintain"
+    - is_within_maintenance_range: bool (within +/- 3% of target weight)
+    - distance_from_goal: current weight minus target weight (lbs)
     """
     
     # Read weight entries
@@ -562,8 +569,74 @@ def create_weight_features() -> DataFrame:
         F.lit(1)
     )
     
-    # STILL NEEDED: Join with weight_goals table to calculate goal-specific metrics
-    # (is_within_maintenance_range, distance_from_goal, weight_goal_type, etc.)
+    # ──────────────────────────────────────────────
+    # Join with weight goals table
+    # ──────────────────────────────────────────────
+    try:
+        goals_df = (spark.read.table(get_table_path("weight_goals"))
+                    .select(
+                        "patientid",
+                        "startdate",
+                        "targetweight",
+                        "type",
+                        "status",
+                        "targetreacheddate"
+                    ))
+        
+        # Filter to active goals
+        active_goals = goals_df.filter(
+            F.col("status").isin(CONFIG["status_values"]["active_status"])
+        )
+        
+        # Get the most recent active goal per patient
+        window_latest_goal = Window.partitionBy("patientid").orderBy(F.col("startdate").desc())
+        active_goals = (active_goals
+                       .withColumn("rn", F.row_number().over(window_latest_goal))
+                       .filter(F.col("rn") == 1)
+                       .drop("rn")
+                       .withColumnRenamed("type", "weight_goal_type"))
+        
+        # Join weight entries with the patient's current goal
+        weight_daily = weight_daily.join(
+            active_goals.select("patientid", "weight_goal_type", "targetweight"),
+            "patientid",
+            "left"
+        )
+        
+        # has_weight_goal: True if the patient has an active goal
+        weight_daily = weight_daily.withColumn(
+            "has_weight_goal",
+            F.when(F.col("weight_goal_type").isNotNull(), 1).otherwise(0)
+        )
+        
+        # is_within_maintenance_range: weight within +/- 3% of target (maintenance goal only)
+        tol = CONFIG["thresholds"]["weight_maintenance_tolerance_pct"] / 100.0  # e.g. 0.03
+        weight_daily = weight_daily.withColumn(
+            "is_within_maintenance_range",
+            F.when(
+                (F.col("weight_goal_type") == "maintain") &
+                F.col("targetweight").isNotNull() &
+                (F.col("weight_lbs") >= F.col("targetweight") * (1 - tol)) &
+                (F.col("weight_lbs") <= F.col("targetweight") * (1 + tol)),
+                1
+            ).otherwise(0)
+        )
+        
+        # distance_from_goal: positive means above target, negative means below
+        weight_daily = weight_daily.withColumn(
+            "distance_from_goal",
+            F.when(
+                F.col("targetweight").isNotNull(),
+                F.col("weight_lbs") - F.col("targetweight")
+            ).otherwise(None)
+        )
+        
+    except Exception as e:
+        print(f"⚠ Warning: Could not join weight goals: {e}")
+        weight_daily = weight_daily.withColumn("has_weight_goal", F.lit(0))
+        weight_daily = weight_daily.withColumn("weight_goal_type", F.lit(None).cast("string"))
+        weight_daily = weight_daily.withColumn("is_within_maintenance_range", F.lit(0))
+        weight_daily = weight_daily.withColumn("distance_from_goal", F.lit(None).cast("double"))
     
     final_weight = weight_daily.select(
         "patientid",
@@ -572,7 +645,11 @@ def create_weight_features() -> DataFrame:
         "weight_lbs_delta",
         "weight_change_pct",
         "days_since_last_weight",
-        "weight_logged_today"
+        "weight_logged_today",
+        "has_weight_goal",
+        "weight_goal_type",
+        "is_within_maintenance_range",
+        "distance_from_goal"
     )
     
     return final_weight
@@ -744,7 +821,8 @@ def create_sleep_features() -> DataFrame:
                 ))
     
     # Apply timezone and filter
-    sleep_df = add_local_date(sleep_df, "startdatetime")
+    # Use enddatetime: sleep counts for the day it ended (when the patient woke up)
+    sleep_df = add_local_date(sleep_df, "enddatetime")
     sleep_df = filter_active_records(sleep_df, "observationstatus")
     
     # Calculate sleep duration in hours
@@ -807,87 +885,222 @@ print("✓ Sleep feature function created")
 def create_medication_features() -> DataFrame:
     """
     Calculates medication adherence metrics by joining administration with prescriptions.
+    
+    Uses per-medication expected dose calculation based on frequencytype/frequencyvalue
+    and caps adherence per-medication to prevent over-taking one med from masking
+    missed doses of another.
+    
+    Output columns:
+    - meds_taken_count: Total doses taken that day
+    - active_prescription_count: Number of active prescriptions for the patient
+    - expected_daily_doses: Total expected doses across all active prescriptions
+    - med_adherence_pct_1d: Adherence % (capped at 100 per medication)
+    - took_all_meds: Boolean flag if adherence == 100%
+    - med_adherence_7d_avg: Rolling 7-day average adherence
+    - med_reminders_enabled: 1 if patient has any reminder set in medprescriptiondayschedule
     """
     
-    # Read medication administration
+    # ──────────────────────────────────────────────
+    # 1. Read & prepare administration records
+    # ──────────────────────────────────────────────
     admin_df = (spark.read.table(get_table_path("med_administration"))
                 .select(
                     "patientid",
+                    "medicationid",
+                    "medprescriptionid",
                     "statusid",
-                    "administrationdate",
                     "dose",
+                    "administrationdate",
                     "administrationtimezoneoffset"
                 )
                 .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset"))
     
-    # Apply timezone and filter to taken medications
+    # Apply timezone and filter to taken medications (statusid=1 means taken)
     admin_df = add_local_date(admin_df, "administrationdate")
-    admin_df = admin_df.filter(F.col("statusid").isin(CONFIG["status_values"]["active_status"]))
+    admin_df = admin_df.filter(F.col("statusid") == 1)
     
-    # Count medications taken per day
-    admin_daily = admin_df.groupBy("patientid", "local_date").agg(
-        F.count("*").alias("meds_taken_count")
-    )
-    
-    # Read prescriptions to get scheduled count
-    # Note: This is simplified - in reality, you'd need to calculate
-    # expected doses based on frequencytype and frequencyvalue
+    # ──────────────────────────────────────────────
+    # 2. Read & prepare prescription records
+    # ──────────────────────────────────────────────
     try:
         prescription_df = (spark.read.table(get_table_path("med_prescription"))
                           .select(
                               "patientid",
+                              "medprescriptionid",
+                              "medicationid",
                               "frequencytype",
                               "frequencyvalue",
                               "startdate",
-                              "statusid"
+                              "statusid",
+                              "discontinueddate"
                           ))
         
-        # Filter to active prescriptions
-        prescription_df = prescription_df.filter(
-            F.col("statusid").isin(CONFIG["status_values"]["active_status"])
+        # Filter to active prescriptions (statusid=1)
+        active_rx = prescription_df.filter(F.col("statusid") == 1)
+        
+        # ──────────────────────────────────────────────
+        # 3. Calculate expected daily doses per prescription
+        # ──────────────────────────────────────────────
+        # Determine doses per day from frequencyvalue (default to 1 if unknown)
+        active_rx = active_rx.withColumn(
+            "doses_per_day",
+            F.coalesce(F.col("frequencyvalue").cast("int"), F.lit(1))
         )
         
-        # Count active prescriptions per patient
-        # STILL NEEDED: More sophisticated logic to calculate daily expected doses
-        prescription_count = prescription_df.groupBy("patientid").agg(
-            F.count("*").alias("active_prescription_count")
+        # Get the date each prescription became active (for date-range filtering)
+        active_rx = active_rx.withColumn(
+            "rx_start_date",
+            F.to_date("startdate")
+        ).withColumn(
+            "rx_end_date",
+            F.coalesce(F.to_date("discontinueddate"), F.current_date())
         )
         
-        # Join with administration data
-        med_daily = admin_daily.join(prescription_count, "patientid", "left")
+        # ──────────────────────────────────────────────
+        # 4. Count active prescriptions per patient (patient-level)
+        # ──────────────────────────────────────────────
+        prescription_count = active_rx.groupBy("patientid").agg(
+            F.count("*").alias("active_prescription_count"),
+            F.sum("doses_per_day").alias("expected_daily_doses")
+        )
         
-        # Calculate adherence percentage
+        # ──────────────────────────────────────────────
+        # 5. Per-medication daily adherence (capped)
+        # ──────────────────────────────────────────────
+        # Count doses taken per patient, per medication, per day
+        admin_per_med_day = admin_df.groupBy("patientid", "local_date", "medicationid").agg(
+            F.count("*").alias("doses_taken")
+        )
+        
+        # Join with prescriptions to get expected doses per med
+        # A medication may have multiple prescriptions; sum their doses_per_day
+        rx_per_med = active_rx.groupBy("patientid", "medicationid").agg(
+            F.sum("doses_per_day").alias("expected_doses_per_med"),
+            F.min("rx_start_date").alias("rx_start_date"),
+            F.max("rx_end_date").alias("rx_end_date")
+        )
+        
+        admin_with_expected = admin_per_med_day.join(
+            rx_per_med,
+            ["patientid", "medicationid"],
+            "left"
+        )
+        
+        # Filter: only count days where the prescription was active
+        admin_with_expected = admin_with_expected.filter(
+            (F.col("rx_start_date").isNull()) |  # no prescription record - still count
+            (
+                (F.col("local_date") >= F.col("rx_start_date")) &
+                (F.col("local_date") <= F.col("rx_end_date"))
+            )
+        )
+        
+        # Cap doses taken at expected per medication (prevents over-taking from masking misses)
+        admin_with_expected = admin_with_expected.withColumn(
+            "expected_doses_per_med",
+            F.coalesce(F.col("expected_doses_per_med"), F.lit(1))
+        ).withColumn(
+            "capped_doses_taken",
+            F.least(F.col("doses_taken"), F.col("expected_doses_per_med"))
+        )
+        
+        # ──────────────────────────────────────────────
+        # 6. Aggregate to patient-day level
+        # ──────────────────────────────────────────────
+        med_daily = admin_with_expected.groupBy("patientid", "local_date").agg(
+            F.sum("capped_doses_taken").alias("capped_taken_total"),
+            F.sum("expected_doses_per_med").alias("expected_total"),
+            F.sum("doses_taken").alias("meds_taken_count")
+        )
+        
+        # Join with prescription counts
+        med_daily = med_daily.join(prescription_count, "patientid", "left")
+        
+        # Calculate adherence: capped_taken / expected (per-med capping already applied)
         med_daily = med_daily.withColumn(
             "med_adherence_pct_1d",
             F.when(
-                F.col("active_prescription_count").isNotNull() & (F.col("active_prescription_count") > 0),
-                (F.col("meds_taken_count") / F.col("active_prescription_count")) * 100
+                F.col("expected_total").isNotNull() & (F.col("expected_total") > 0),
+                F.least(
+                    (F.col("capped_taken_total") / F.col("expected_total")) * 100,
+                    F.lit(100.0)
+                )
             ).otherwise(None)
-        )
-        
-        # Cap at 100% (in case they log extra doses)
-        med_daily = med_daily.withColumn(
-            "med_adherence_pct_1d",
-            F.when(F.col("med_adherence_pct_1d") > 100, 100).otherwise(F.col("med_adherence_pct_1d"))
         )
         
         # Flag: took all meds (100% adherence)
         med_daily = med_daily.withColumn(
             "took_all_meds",
-            F.when(F.col("med_adherence_pct_1d") == 100, 1).otherwise(0)
+            F.when(F.col("med_adherence_pct_1d") >= 100, 1).otherwise(0)
         )
         
-        # Calculate 7-day rolling adherence
-        window = Window.partitionBy("patientid").orderBy("local_date").rowsBetween(-6, 0)
+        # ──────────────────────────────────────────────
+        # 7. Rolling 7-day adherence average
+        # ──────────────────────────────────────────────
+        window_7d = Window.partitionBy("patientid").orderBy("local_date").rowsBetween(-6, 0)
         med_daily = med_daily.withColumn(
             "med_adherence_7d_avg",
-            F.avg("med_adherence_pct_1d").over(window)
+            F.avg("med_adherence_pct_1d").over(window_7d)
+        )
+        
+        # ──────────────────────────────────────────────
+        # 8. Medication reminders from medprescriptiondayschedule
+        # ──────────────────────────────────────────────
+        try:
+            schedule_df = (spark.read.table(get_table_path("med_schedule"))
+                          .select("medprescriptionid", "medicationreminder"))
+            
+            # Join schedule records with active prescriptions to get patientid
+            rx_with_reminders = (active_rx
+                                 .select("patientid", "medprescriptionid")
+                                 .join(schedule_df, "medprescriptionid", "inner"))
+            
+            # Patient has reminders enabled if ANY prescription schedule has a non-null,
+            # non-zero medicationreminder value
+            reminder_per_patient = rx_with_reminders.groupBy("patientid").agg(
+                F.max(
+                    F.when(
+                        F.col("medicationreminder").isNotNull() &
+                        (F.col("medicationreminder").cast("int") != 0),
+                        1
+                    ).otherwise(0)
+                ).alias("med_reminders_enabled")
+            )
+            
+            med_daily = med_daily.join(reminder_per_patient, "patientid", "left")
+            med_daily = med_daily.withColumn(
+                "med_reminders_enabled",
+                F.coalesce(F.col("med_reminders_enabled"), F.lit(0))
+            )
+        except Exception as e:
+            print(f"⚠ Warning: Could not fetch med reminders from schedule table: {e}")
+            med_daily = med_daily.withColumn("med_reminders_enabled", F.lit(0))
+        
+        # Select final columns
+        med_daily = med_daily.select(
+            "patientid",
+            "local_date",
+            "meds_taken_count",
+            "active_prescription_count",
+            "expected_daily_doses",
+            "med_adherence_pct_1d",
+            "took_all_meds",
+            "med_adherence_7d_avg",
+            "med_reminders_enabled"
         )
         
     except Exception as e:
         print(f"⚠ Warning: Could not calculate adherence with prescriptions: {e}")
-        med_daily = admin_daily.withColumn("med_adherence_pct_1d", F.lit(None))
+        # Fallback: simple count-based approach
+        med_daily = admin_df.groupBy("patientid", "local_date").agg(
+            F.count("*").alias("meds_taken_count")
+        )
+        med_daily = med_daily.withColumn("active_prescription_count", F.lit(None).cast("int"))
+        med_daily = med_daily.withColumn("expected_daily_doses", F.lit(None).cast("int"))
+        med_daily = med_daily.withColumn("med_adherence_pct_1d", F.lit(None).cast("double"))
         med_daily = med_daily.withColumn("took_all_meds", F.lit(0))
+        med_daily = med_daily.withColumn("med_adherence_7d_avg", F.lit(None).cast("double"))
+        med_daily = med_daily.withColumn("med_reminders_enabled", F.lit(0))
     
     return med_daily
 
@@ -1243,6 +1456,94 @@ print("✓ Exercise program feature function created")
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC ## 10b. Feature Engineering - User Focus Areas
+
+# COMMAND ----------
+
+def create_focus_features() -> DataFrame:
+    """
+    Extracts active user focus areas from the customizemyappdetails table.
+    
+    The myfocusdata column contains a JSON array of structs with:
+      - MyFocusID: int  (maps to focus name)
+      - IsMyFocus: int  (0/1 whether it's active)
+      - FocusOptionID: int (selection detail)
+    
+    Focus ID → Name mapping:
+      1  → Medications
+      2  → Glucose
+      3  → Eating Habits
+      5  → Blood Pressure    (not used in scoring)
+      6  → Activity
+      7  → Sleep
+      8  → Weight
+      11 → Thoughts          (not used in scoring)
+      12 → Mood              (not used in scoring)
+      13 → Anxiety
+      19 → PAP Device        (not used in scoring)
+    
+    Returns:
+        DataFrame with columns:
+          - patientid (string)
+          - user_focus (string, comma-separated list of active focus names,
+                        e.g. "Weight,Glucose,Activity" or None if none active)
+    """
+    
+    customize_df = spark.read.table(get_table_path("user_focus"))
+    
+    # Focus ID → category name mapping (only scoring-relevant focuses)
+    focus_id_mapping = {
+        1: "Medications",
+        2: "Glucose",
+        3: "Eating Habits",
+        6: "Activity",
+        7: "Sleep",
+        8: "Weight",
+        13: "Anxiety",
+    }
+    
+    # Parse the myfocusdata JSON array
+    focus_parsed = customize_df.select(
+        F.col("patientid"),
+        F.explode(F.col("myfocusdata")).alias("focus_item")
+    ).select(
+        F.col("patientid"),
+        F.col("focus_item.MyFocusID").alias("focus_id"),
+        F.col("focus_item.IsMyFocus").alias("is_active"),
+    )
+    
+    # Filter to active focuses only (IsMyFocus = 1)
+    active_focuses = focus_parsed.filter(F.col("is_active") == 1)
+    
+    # Map focus IDs to names using a CASE expression
+    focus_case = F.lit(None).cast("string")
+    for fid, fname in focus_id_mapping.items():
+        focus_case = F.when(F.col("focus_id") == fid, F.lit(fname)).otherwise(focus_case)
+    
+    active_focuses = active_focuses.withColumn("focus_name", focus_case)
+    
+    # Drop unmapped focus IDs (Blood Pressure, Mood, Thoughts, PAP Device)
+    active_focuses = active_focuses.filter(F.col("focus_name").isNotNull())
+    
+    # Aggregate to one row per patient: comma-separated list of active focus names
+    focus_agg = (active_focuses
+                 .groupBy("patientid")
+                 .agg(
+                     F.concat_ws(",", F.collect_set("focus_name")).alias("user_focus")
+                 ))
+    
+    # Replace empty strings with None
+    focus_agg = focus_agg.withColumn(
+        "user_focus",
+        F.when(F.col("user_focus") == "", None).otherwise(F.col("user_focus"))
+    )
+    
+    return focus_agg.select("patientid", "user_focus")
+
+print("✓ Focus feature function created")
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## 11. Master Feature Assembly - Create Gold Table
 
 # COMMAND ----------
@@ -1305,6 +1606,10 @@ def create_gold_feature_table() -> DataFrame:
     exercise_program_daily, exercise_program_summary = create_exercise_program_features()
     print("  ✓ Exercise program features")
     
+    # User focus features (patient-level)
+    focus_features = create_focus_features()
+    print("  ✓ Focus features")
+    
     # Create a base spine of all patient-date combinations
     # This ensures we don't lose days where a patient had no activity
     print("\n🔧 Joining all features...")
@@ -1342,6 +1647,9 @@ def create_gold_feature_table() -> DataFrame:
     
     # Exercise program summary (patient-level)
     gold_df = gold_df.join(exercise_program_summary, "patientid", "left")
+    
+    # User focus areas (patient-level)
+    gold_df = gold_df.join(focus_features, "patientid", "left")
     
     # Rename local_date to report_date for clarity
     gold_df = gold_df.withColumnRenamed("local_date", "report_date")
@@ -1843,7 +2151,7 @@ yesterday = F.date_sub(F.current_date(), 1)
 # MAGIC - Journey config (when available): `CONFIG["journey_config"]`
 # MAGIC 
 # MAGIC **Next Steps**:
-# MAGIC 1. Update table names in CONFIG section (especially weight_goals table)
+# MAGIC 1. Validate A1C patient profile table and confirm enum values
 # MAGIC 2. Validate A1C patient profile table and add to config
 # MAGIC 3. Run this notebook to create feature store
 # MAGIC 4. Build LLM selection logic using the eligibility flags

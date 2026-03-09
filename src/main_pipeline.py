@@ -121,7 +121,7 @@ def get_user_profile(spark, patient_id: str) -> Dict[str, Any]:
     return {
         'patient_id': patient_id,
         'user_focus': None,
-        'a1c_target_group': 'dm_target_7'
+        'a1c_target_group': None
     }
 
 
@@ -135,8 +135,8 @@ def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> Use
     }
     
     a1c_group = a1c_mapping.get(
-        profile.get('a1c_target_group', 'dm_target_7'),
-        A1CTargetGroup.DM_TARGET_7
+        features.get('a1c_target_group'),  # Read from Gold table features
+        None  # stays None — effective_a1c_group in logic_engine will fall back to DM_TARGET_7
     )
     
     return UserContext(
@@ -151,7 +151,7 @@ def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> Use
         weight_goal_type=features.get('weight_goal_type'),
         has_active_journey=bool(features.get('has_active_journey', False)),
         has_exercise_program=bool(features.get('has_active_exercise_program', False)),
-        user_focus=profile.get('user_focus'),
+        user_focus=features.get('user_focus', '').split(',') if features.get('user_focus') else None,
         a1c_target_group=a1c_group,
         med_reminders_enabled=bool(features.get('med_reminders_enabled', False)),
         
@@ -629,7 +629,8 @@ class MLflowWrapper(PythonModel):
             has_medications=bool((features.get('active_prescription_count') or 0) > 0),
             has_weight_goal=bool(features.get('has_weight_goal', False)),
             weight_goal_type=features.get('weight_goal_type'),
-            a1c_target_group=a1c_mapping.get('dm_target_7', A1CTargetGroup.DM_TARGET_7),
+            user_focus=features.get('user_focus', '').split(',') if features.get('user_focus') else None,
+            a1c_target_group=a1c_mapping.get(features.get('a1c_target_group'), None),
             tir_pct=features.get('tir_pct'),
             daily_step_count=features.get('daily_step_count'),
             weekly_active_minutes=features.get('active_minutes_7d_sum'),

@@ -13,10 +13,10 @@ from datetime import datetime, timedelta
 from dataclasses import asdict
 from typing import Dict, Any, Optional, List, Tuple
 
-# Add parent directory to path so we can import logic_engine & insight_generator
-PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PARENT_DIR not in sys.path:
-    sys.path.insert(0, PARENT_DIR)
+# Add src/ directory to path so we can import logic_engine & insight_generator
+SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 from logic_engine import (
     LogicEngine,
@@ -33,86 +33,344 @@ from insight_generator import InsightGenerator
 # SCENARIO DEFINITIONS — Maps dropdown labels to realistic value ranges
 # =============================================================================
 
-GLUCOSE_SCENARIOS = {
-    "Excellent (TIR 80%+)": {"tir_range": (80, 95), "high_pct_range": (2, 10), "low_pct_range": (0, 2)},
-    "Good (TIR 60-80%)": {"tir_range": (60, 79), "high_pct_range": (10, 25), "low_pct_range": (1, 4)},
-    "Fair (TIR 40-60%)": {"tir_range": (40, 59), "high_pct_range": (25, 40), "low_pct_range": (2, 6)},
-    "Poor (TIR <40%)": {"tir_range": (15, 39), "high_pct_range": (40, 60), "low_pct_range": (4, 10)},
-    "No CGM Data": {"tir_range": None, "high_pct_range": None, "low_pct_range": None},
-}
-
-STEP_SCENARIOS = {
-    "Very Active (10K+)": {"range": (10000, 18000)},
-    "Active (6K-10K)": {"range": (6000, 9999)},
-    "Light (2K-6K)": {"range": (2000, 5999)},
-    "Sedentary (<2K)": {"range": (200, 1999)},
-    "No Step Data": {"range": None},
-}
-
-ACTIVITY_SCENARIOS = {
-    "Very Active (150+ min/wk)": {"daily_range": (25, 60), "weekly_range": (150, 300)},
-    "Active (90-150 min/wk)": {"daily_range": (15, 30), "weekly_range": (90, 149)},
-    "Moderate (30-90 min/wk)": {"daily_range": (5, 15), "weekly_range": (30, 89)},
-    "Sedentary (<30 min/wk)": {"daily_range": (0, 5), "weekly_range": (0, 29)},
-    "No Activity Data": {"daily_range": None, "weekly_range": None},
-}
-
-SLEEP_SCENARIOS = {
-    "Excellent (7h+, rating 8+)": {"hours_range": (7.0, 9.0), "rating_range": (8, 10)},
-    "Good (6-7h, rating 6-7)": {"hours_range": (6.0, 6.9), "rating_range": (6, 7)},
-    "Fair (5-6h, rating 4-5)": {"hours_range": (5.0, 5.9), "rating_range": (4, 5)},
-    "Poor (<5h, rating <4)": {"hours_range": (3.0, 4.9), "rating_range": (1, 3)},
-    "No Sleep Data": {"hours_range": None, "rating_range": None},
-}
-
-FOOD_SCENARIOS = {
-    "Thorough (3+ meals)": {"meals_range": (3, 4), "nutrient_met": True, "days_with_meals_7d": 6},
-    "Moderate (1-2 meals)": {"meals_range": (1, 2), "nutrient_met": False, "days_with_meals_7d": 4},
-    "Minimal (logged once)": {"meals_range": (1, 1), "nutrient_met": False, "days_with_meals_7d": 1},
-    "No Food Logging": {"meals_range": (0, 0), "nutrient_met": False, "days_with_meals_7d": 0},
-}
-
-MED_SCENARIOS = {
-    "Perfect (100%)": {"adherence_range": (1.0, 1.0), "took_all": True},
-    "Good (75-99%)": {"adherence_range": (0.75, 0.99), "took_all": False},
-    "Fair (50-74%)": {"adherence_range": (0.50, 0.74), "took_all": False},
-    "Poor (<50%)": {"adherence_range": (0.10, 0.49), "took_all": False},
-    "No Medications": {"adherence_range": None, "took_all": False},
-}
-
+# ---------------------------------------------------------------------------
+# Column B — Weight
+# ---------------------------------------------------------------------------
 WEIGHT_SCENARIOS = {
-    "Losing (on track)": {"change_lbs": (-3.0, -1.0), "change_pct": (-3.0, -1.0), "logged_recently": True},
-    "Stable (within ±1 lb)": {"change_lbs": (-0.9, 0.9), "change_pct": (-1.0, 1.0), "logged_recently": True},
-    "Gaining": {"change_lbs": (1.0, 4.0), "change_pct": (1.0, 4.0), "logged_recently": True},
-    "Not Logging": {"change_lbs": None, "change_pct": None, "logged_recently": False},
+    "Weight loss goal: logged & decreased": {
+        "has_goal": True, "goal_type": "lose",
+        "change_lbs": (-4.0, -0.5), "change_pct": (-3.0, -0.5),
+        "logged_recently": True, "within_maintenance": False,
+    },
+    "Weight loss goal: logged & increased": {
+        "has_goal": True, "goal_type": "lose",
+        "change_lbs": (0.5, 4.0), "change_pct": (0.5, 3.0),
+        "logged_recently": True, "within_maintenance": False,
+    },
+    "Weight maintenance: +/-3% goal": {
+        "has_goal": True, "goal_type": "maintain",
+        "change_lbs": (-1.5, 1.5), "change_pct": (-3.0, 3.0),
+        "logged_recently": True, "within_maintenance": True,
+    },
+    "Weight maintenance: >3% goal": {
+        "has_goal": True, "goal_type": "maintain",
+        "change_lbs": (3.0, 8.0), "change_pct": (3.0, 8.0),
+        "logged_recently": True, "within_maintenance": False,
+    },
+    "No goal: logged & decreased": {
+        "has_goal": False, "goal_type": None,
+        "change_lbs": (-4.0, -0.5), "change_pct": (-3.0, -0.5),
+        "logged_recently": True, "within_maintenance": False,
+    },
+    "No goal: logged & increased": {
+        "has_goal": False, "goal_type": None,
+        "change_lbs": (0.5, 4.0), "change_pct": (0.5, 3.0),
+        "logged_recently": True, "within_maintenance": False,
+    },
+    "No weight entry > 6 days": {
+        "has_goal": False, "goal_type": None,
+        "change_lbs": None, "change_pct": None,
+        "logged_recently": False, "days_since": (7, 30), "within_maintenance": False,
+    },
+    "No weight data": {
+        "has_goal": False, "goal_type": None,
+        "change_lbs": None, "change_pct": None,
+        "logged_recently": False, "days_since": (30, 90), "within_maintenance": False,
+    },
 }
 
+# ---------------------------------------------------------------------------
+# Column C — Glucose
+# ---------------------------------------------------------------------------
+GLUCOSE_SCENARIOS = {
+    "No CGM": {
+        "has_cgm": False,
+        "tir_range": None, "high_pct_range": None, "low_pct_range": None,
+    },
+    "DM (A1C <7): TIR >= 70%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "tir_range": (70, 95), "high_pct_range": (2, 15), "low_pct_range": (0, 3),
+    },
+    "DM (A1C <8): TIR >= 50%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "tir_range": (50, 95), "high_pct_range": (2, 20), "low_pct_range": (0, 4),
+    },
+    "DIP User: TIR >= 70%": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "tir_range": (70, 95), "high_pct_range": (2, 10), "low_pct_range": (0, 3),
+    },
+    "Non-DM User: TIR >= 90%": {
+        "has_cgm": True, "a1c_hint": "NON_DM",
+        "tir_range": (90, 98), "high_pct_range": (0, 5), "low_pct_range": (0, 2),
+    },
+    "TIR improved from prev day": {
+        "has_cgm": True,
+        "tir_range": (50, 80), "high_pct_range": (10, 30), "low_pct_range": (1, 5),
+        "improved": True,
+    },
+    "DM (A1C <7): TIR <70%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "DM (A1C <7): TIR <70% + No meals": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7", "no_meals": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "DM (A1C <7): TIR <70% + No meds": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7", "no_meds": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "DM (A1C <8): TIR <50%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+    },
+    "DM (A1C <8): TIR <50% + No meals": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8", "no_meals": True,
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+    },
+    "DM (A1C <8): TIR <50% + No meds": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8", "no_meds": True,
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+    },
+    "DIP: TIR <70%": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "DIP: TIR <70% + No meals": {
+        "has_cgm": True, "a1c_hint": "DIP", "no_meals": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "DIP: TIR <70% + No meds": {
+        "has_cgm": True, "a1c_hint": "DIP", "no_meds": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    },
+    "Non-DM: TIR <90%": {
+        "has_cgm": True, "a1c_hint": "NON_DM",
+        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (1, 5),
+    },
+    "Non-DM: TIR <90% + No meals": {
+        "has_cgm": True, "a1c_hint": "NON_DM", "no_meals": True,
+        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (1, 5),
+    },
+    "DM (A1C <7): High >25%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (1, 4),
+    },
+    "DM (A1C <8): High >50%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "tir_range": (10, 40), "high_pct_range": (51, 70), "low_pct_range": (1, 4),
+    },
+    "DIP: High >25%": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (1, 4),
+    },
+    "Non-DM: Above Target >5%": {
+        "has_cgm": True, "a1c_hint": "NON_DM",
+        "tir_range": (60, 89), "high_pct_range": (6, 20), "low_pct_range": (1, 3),
+    },
+    "DM (A1C <7): Low/V-Low >4%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "tir_range": (40, 70), "high_pct_range": (5, 20), "low_pct_range": (5, 15),
+    },
+    "DM (A1C <8): Low/V-Low >1%": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "tir_range": (40, 70), "high_pct_range": (5, 20), "low_pct_range": (2, 10),
+    },
+    "DIP: Low/V-Low >5%": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "tir_range": (40, 70), "high_pct_range": (5, 20), "low_pct_range": (6, 15),
+    },
+    "Non-DM: Low >1%": {
+        "has_cgm": True, "a1c_hint": "NON_DM",
+        "tir_range": (70, 89), "high_pct_range": (3, 10), "low_pct_range": (2, 8),
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Column D — Activity (consolidated: active minutes + video + program)
+# ---------------------------------------------------------------------------
+ACTIVITY_SCENARIOS = {
+    "Logged active minutes": {
+        "daily_range": (15, 45), "weekly_range": (100, 200),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": False, "prog_progress": False,
+    },
+    "Did not log active minutes": {
+        "daily_range": None, "weekly_range": (0, 30),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": False, "prog_progress": False,
+    },
+    "Logged active min >= prev day": {
+        "daily_range": (20, 60), "weekly_range": (120, 250),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": False, "prog_progress": False,
+        "ge_prev_day": True,
+    },
+    "Completed 90% video": {
+        "daily_range": (20, 45), "weekly_range": (100, 200),
+        "vid_today": True, "vid_7d": True,
+        "prog_active": False, "prog_progress": False,
+    },
+    "Started exercise program": {
+        "daily_range": (15, 40), "weekly_range": (80, 180),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": True, "prog_progress": True,
+    },
+    "Met 150 min goal in last month but not last week": {
+        "daily_range": (0, 15), "weekly_range": (0, 50),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": False, "prog_progress": False,
+        "monthly_goal": True,
+    },
+    "Total activity < 150 min": {
+        "daily_range": (0, 10), "weekly_range": (0, 90),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": False, "prog_progress": False,
+    },
+    "Active program: uncompleted": {
+        "daily_range": (10, 30), "weekly_range": (50, 120),
+        "vid_today": False, "vid_7d": False,
+        "prog_active": True, "prog_progress": False,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Column E — Steps
+# ---------------------------------------------------------------------------
+STEP_SCENARIOS = {
+    "Logged >= 10000 steps": {"range": (10000, 18000), "more_than_prev": False},
+    "Logged more steps (than previous day)": {"range": (5000, 14000), "more_than_prev": True},
+    "Avg steps < 6,000": {"range": (1000, 5999), "more_than_prev": False},
+    "Steps 6k-9.9k & decreased": {"range": (6000, 9999), "more_than_prev": False, "decreased": True},
+    "No step data": {"range": None},
+}
+
+# ---------------------------------------------------------------------------
+# Column F — Food
+# ---------------------------------------------------------------------------
+FOOD_SCENARIOS = {
+    "Logged at least one meal": {
+        "meals_range": (1, 3), "nutrient_met": False, "days_7d": 3,
+        "logged_yesterday": False, "ai_plan": False, "has_target": True,
+    },
+    "Logged food prev day": {
+        "meals_range": (2, 4), "nutrient_met": False, "days_7d": 5,
+        "logged_yesterday": True, "ai_plan": False, "has_target": True,
+    },
+    "Reached 90-110% target": {
+        "meals_range": (3, 4), "nutrient_met": True, "days_7d": 6,
+        "logged_yesterday": True, "ai_plan": False, "has_target": True,
+    },
+    "Generated AI meal plan": {
+        "meals_range": (1, 3), "nutrient_met": False, "days_7d": 3,
+        "logged_yesterday": False, "ai_plan": True, "has_target": True,
+    },
+    "Has target; not meeting": {
+        "meals_range": (1, 2), "nutrient_met": False, "days_7d": 2,
+        "logged_yesterday": False, "ai_plan": False, "has_target": True,
+    },
+    "Did not log yesterday (month ok)": {
+        "meals_range": (0, 0), "nutrient_met": False, "days_7d": 4,
+        "logged_yesterday": False, "ai_plan": False, "has_target": True,
+    },
+    "No log yesterday/month": {
+        "meals_range": (0, 0), "nutrient_met": False, "days_7d": 0,
+        "logged_yesterday": False, "ai_plan": False, "has_target": False,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Column G — Sleep
+# ---------------------------------------------------------------------------
+SLEEP_SCENARIOS = {
+    "Slept >= 7 hours": {
+        "hours_range": (7.0, 9.0), "rating_range": (5, 8),
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+    "Slept > prev day": {
+        "hours_range": (6.5, 8.5), "rating_range": (5, 8),
+        "ge_prev": True, "rating_ge_prev": False,
+    },
+    "Slept >= 7h & Rating >= 7": {
+        "hours_range": (7.0, 9.0), "rating_range": (7, 10),
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+    "Slept >= 7h & Rating > prev": {
+        "hours_range": (7.0, 8.5), "rating_range": (6, 9),
+        "ge_prev": False, "rating_ge_prev": True,
+    },
+    "Avg duration >= 7h & Rating >= 7": {
+        "hours_range": (7.0, 9.0), "rating_range": (7, 10),
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+    "Avg duration >= 7h; Rating < 7": {
+        "hours_range": (7.0, 9.0), "rating_range": (3, 6),
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+    "Avg duration < 7h": {
+        "hours_range": (4.0, 6.9), "rating_range": (3, 6),
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+    "No sleep entries": {
+        "hours_range": None, "rating_range": None,
+        "ge_prev": False, "rating_ge_prev": False,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Column H — Medications
+# ---------------------------------------------------------------------------
+MED_SCENARIOS = {
+    "Took all meds": {"adherence_range": (1.0, 1.0), "took_all": True, "has_meds": True},
+    "Taken 50-99% meds": {"adherence_range": (0.50, 0.99), "took_all": False, "has_meds": True},
+    "Taken < 50% meds": {"adherence_range": (0.05, 0.49), "took_all": False, "has_meds": True},
+    "No meds on Med List": {"adherence_range": None, "took_all": False, "has_meds": False},
+}
+
+# ---------------------------------------------------------------------------
+# Column I — Mental Well-being
+# ---------------------------------------------------------------------------
 MENTAL_WELLBEING_SCENARIOS = {
-    "Highly Engaged": {"meditation": True, "journal": True, "action_plan": True},
-    "Moderate": {"meditation": True, "journal": False, "action_plan": False},
-    "Minimal": {"meditation": False, "journal": False, "action_plan": False},
+    "Opened a meditation": {"meditation": True, "journal": False, "action_plan": False},
+    "Made a journal entry": {"meditation": False, "journal": True, "action_plan": False},
+    "Progress on Action Plan": {"meditation": False, "journal": False, "action_plan": True},
+    "No meditation (30 days)": {"meditation": False, "journal": False, "action_plan": False},
+    "No journal (30 days)": {"meditation": False, "journal": False, "action_plan": False},
+    "No Action Plan progress": {"meditation": False, "journal": False, "action_plan": False},
+    "Took no actions": {"meditation": False, "journal": False, "action_plan": False},
 }
 
+# ---------------------------------------------------------------------------
+# Column J — Explore
+# ---------------------------------------------------------------------------
+EXPLORE_SCENARIOS = {
+    "Read an article": {"vid_completed_7d": False, "lesson_completed": False, "content_opened": True},
+    "Watched Learn video": {"vid_completed_7d": True, "lesson_completed": False, "content_opened": True},
+    "Completed lesson": {"vid_completed_7d": False, "lesson_completed": True, "content_opened": True},
+    "No content opened": {"vid_completed_7d": False, "lesson_completed": False, "content_opened": False},
+    "Did not read article / watch video / complete lesson": {
+        "vid_completed_7d": False, "lesson_completed": False, "content_opened": False,
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Column K — Journey
+# ---------------------------------------------------------------------------
 JOURNEY_SCENARIOS = {
-    "Active + Task Completed": {"active": True, "task_completed": True, "completed_journey": False},
-    "Active (no recent task)": {"active": True, "task_completed": False, "completed_journey": False},
-    "Completed a Journey": {"active": False, "task_completed": False, "completed_journey": True},
-    "No Journey": {"active": False, "task_completed": False, "completed_journey": False},
+    "Completed task (within an active journey)": {
+        "active": True, "task_completed": True, "completed_journey": False,
+    },
+    "No journey task / Did not complete any task": {
+        "active": True, "task_completed": False, "completed_journey": False,
+    },
+    "No active journey": {
+        "active": False, "task_completed": False, "completed_journey": False,
+    },
 }
 
-EXERCISE_VIDEO_SCENARIOS = {
-    "Completed Video Today": {"completed_today": True, "completed_7d": True, "has_activity": True},
-    "Completed Video This Week": {"completed_today": False, "completed_7d": True, "has_activity": True},
-    "Has Activity (no completion)": {"completed_today": False, "completed_7d": False, "has_activity": True},
-    "No Video Activity": {"completed_today": False, "completed_7d": False, "has_activity": False},
-}
-
-EXERCISE_PROGRAM_SCENARIOS = {
-    "Active + Progress Today": {"active": True, "progress_today": True, "completed_today": False},
-    "Active (no progress)": {"active": True, "progress_today": False, "completed_today": False},
-    "Completed Program Today": {"active": False, "progress_today": False, "completed_today": True},
-    "No Exercise Program": {"active": False, "progress_today": False, "completed_today": False},
-}
+# Keep these as aliases so existing imports don't break
+EXERCISE_VIDEO_SCENARIOS = {k: {"completed_today": v["vid_completed_7d"], "completed_7d": v["vid_completed_7d"], "has_activity": v["content_opened"]} for k, v in EXPLORE_SCENARIOS.items()}
+EXERCISE_PROGRAM_SCENARIOS = {k: {"active": v.get("prog_active", False), "progress_today": v.get("prog_progress", False), "completed_today": False} for k, v in ACTIVITY_SCENARIOS.items()}
 
 
 def _rand_in_range(r: Tuple[float, float]) -> float:
@@ -131,24 +389,19 @@ def _rand_int_in_range(r: Tuple[int, int]) -> int:
 
 def generate_synthetic_context(
     # Profile settings
-    a1c_target_group: str = "DM Target <7%",
-    user_focus: str = "None",
-    weight_goal_type: str = "None",
-    has_cgm: bool = True,
-    has_step_tracker: bool = True,
-    has_medications: bool = True,
-    # Scenario dropdowns
-    glucose_scenario: str = "Good (TIR 60-80%)",
-    step_scenario: str = "Active (6K-10K)",
-    activity_scenario: str = "Active (90-150 min/wk)",
-    sleep_scenario: str = "Good (6-7h, rating 6-7)",
-    food_scenario: str = "Moderate (1-2 meals)",
-    med_scenario: str = "Good (75-99%)",
-    weight_scenario: str = "Stable (within ±1 lb)",
-    mental_scenario: str = "Moderate",
-    journey_scenario: str = "No Journey",
-    exercise_video_scenario: str = "No Video Activity",
-    exercise_program_scenario: str = "No Exercise Program",
+    a1c_target_group: str = "DM (A1C <7): TIR >= 70%",  # can be overridden by glucose scenario hint
+    user_focus: list = None,
+    # Column-aligned scenario dropdowns
+    weight_scenario: str = "No goal: logged & decreased",
+    glucose_scenario: str = "DM (A1C <7): TIR >= 70%",
+    activity_scenario: str = "Logged active minutes",
+    step_scenario: str = "Logged >= 10000 steps",
+    food_scenario: str = "Logged at least one meal",
+    sleep_scenario: str = "Slept >= 7 hours",
+    med_scenario: str = "Took all meds",
+    mental_scenario: str = "Opened a meditation",
+    explore_scenario: str = "Read an article",
+    journey_scenario: str = "No active journey",
 ) -> UserContext:
     """
     Generate a synthetic UserContext based on tester-selected scenarios.
@@ -156,102 +409,120 @@ def generate_synthetic_context(
     Each scenario dropdown maps to a set of realistic value ranges.  Values
     within those ranges are randomized to add variety between runs.
     """
-    # Map A1C dropdown to enum
-    a1c_map = {
-        "DM Target <7%": A1CTargetGroup.DM_TARGET_7,
-        "DM Target <8%": A1CTargetGroup.DM_TARGET_8,
+    # --- GLUCOSE ---
+    g = GLUCOSE_SCENARIOS[glucose_scenario]
+    effective_has_cgm = g["has_cgm"]
+
+    # Derive a1c_group: prefer glucose scenario hint, fall back to a1c_target_group dropdown
+    _hint_map = {
+        "DM_TARGET_7": A1CTargetGroup.DM_TARGET_7,
+        "DM_TARGET_8": A1CTargetGroup.DM_TARGET_8,
+        "DIP":         A1CTargetGroup.DIP,
+        "NON_DM":      A1CTargetGroup.NON_DM,
+    }
+    _dropdown_map = {
+        "DM (A1C <7): TIR >= 70%": A1CTargetGroup.DM_TARGET_7,
+        "DM (A1C <8): TIR >= 50%": A1CTargetGroup.DM_TARGET_8,
         "DIP (Diabetes in Pregnancy)": A1CTargetGroup.DIP,
         "Non-DM": A1CTargetGroup.NON_DM,
     }
-    a1c_group = a1c_map.get(a1c_target_group, A1CTargetGroup.DM_TARGET_7)
+    a1c_group = _hint_map.get(g.get("a1c_hint", ""), _dropdown_map.get(a1c_target_group, A1CTargetGroup.DM_TARGET_7))
 
-    # Map user focus
-    focus_map = {
-        "None": None,
-        "Weight": "Weight",
-        "Glucose": "Glucose",
-        "Activity": "Activity",
-        "Eating Habits": "Eating Habits",
-        "Sleep": "Sleep",
-        "Medications": "Medications",
-        "Anxiety": "Anxiety",
-    }
-    focus_val = focus_map.get(user_focus)
-
-    # --- GLUCOSE ---
-    g = GLUCOSE_SCENARIOS[glucose_scenario]
     tir_pct = _rand_in_range(g["tir_range"]) if g["tir_range"] else None
-    tir_prev_day = round(tir_pct + random.uniform(-10, 5), 1) if tir_pct else None
+    # If TIR improved, previous day's TIR should be lower
+    if g.get("improved") and tir_pct is not None:
+        tir_prev_day = round(max(0.0, tir_pct - random.uniform(5, 15)), 1)
+    else:
+        tir_prev_day = round(tir_pct + random.uniform(-10, 5), 1) if tir_pct else None
+
     glucose_high_pct = _rand_in_range(g["high_pct_range"]) if g["high_pct_range"] else None
-    glucose_low_pct = _rand_in_range(g["low_pct_range"]) if g["low_pct_range"] else None
-    effective_has_cgm = has_cgm and glucose_scenario != "No CGM Data"
+    glucose_low_pct  = _rand_in_range(g["low_pct_range"])  if g["low_pct_range"]  else None
+
+    # Glucose "no_meals" / "no_meds" flags (affect food/med sections below)
+    _glucose_no_meals = g.get("no_meals", False)
+    _glucose_no_meds  = g.get("no_meds",  False)
 
     # --- STEPS ---
     s = STEP_SCENARIOS[step_scenario]
+    effective_has_step_tracker = s["range"] is not None
     daily_step_count = _rand_int_in_range(s["range"]) if s["range"] else None
-    prev_day_steps = _rand_int_in_range((max(500, (s["range"][0] - 2000)), s["range"][1])) if s["range"] else None
-    effective_has_step_tracker = has_step_tracker and step_scenario != "No Step Data"
+    if s.get("more_than_prev") and daily_step_count is not None:
+        prev_day_steps = max(500, daily_step_count - random.randint(500, 2000))
+    elif s.get("decreased") and daily_step_count is not None:
+        prev_day_steps = daily_step_count + random.randint(500, 2000)
+    else:
+        prev_day_steps = _rand_int_in_range((max(500, (s["range"][0] - 2000)), s["range"][1])) if s["range"] else None
 
     # --- ACTIVITY ---
     a = ACTIVITY_SCENARIOS[activity_scenario]
     active_minutes = _rand_in_range(a["daily_range"]) if a["daily_range"] else None
-    prev_day_active_minutes = _rand_in_range(a["daily_range"]) if a["daily_range"] else None
+    if a.get("ge_prev_day") and active_minutes is not None:
+        prev_day_active_minutes = max(0.0, active_minutes - random.uniform(5, 20))
+    else:
+        prev_day_active_minutes = _rand_in_range(a["daily_range"]) if a["daily_range"] else None
     weekly_active_minutes = _rand_in_range(a["weekly_range"]) if a["weekly_range"] else None
     exercise_video_completion_pct = random.uniform(50, 100) if active_minutes and active_minutes > 10 else None
 
     # --- SLEEP ---
     sl = SLEEP_SCENARIOS[sleep_scenario]
     sleep_hours = _rand_in_range(sl["hours_range"]) if sl["hours_range"] else None
-    prev_sleep_hours = _rand_in_range(sl["hours_range"]) if sl["hours_range"] else None
+    if sl.get("ge_prev") and sleep_hours is not None:
+        prev_sleep_hours = max(0.0, sleep_hours - random.uniform(0.5, 1.5))
+    else:
+        prev_sleep_hours = _rand_in_range(sl["hours_range"]) if sl["hours_range"] else None
     sleep_rating = _rand_int_in_range(sl["rating_range"]) if sl["rating_range"] else None
-    prev_sleep_rating = _rand_int_in_range(sl["rating_range"]) if sl["rating_range"] else None
-    avg_sleep_7d = round(sleep_hours + random.uniform(-0.5, 0.5), 1) if sleep_hours else None
-    avg_sleep_rating_7d = round(sleep_rating + random.uniform(-1, 1), 1) if sleep_rating else None
+    if sl.get("rating_ge_prev") and sleep_rating is not None:
+        prev_sleep_rating = max(1, sleep_rating - random.randint(1, 2))
+    else:
+        prev_sleep_rating = _rand_int_in_range(sl["rating_range"]) if sl["rating_range"] else None
+    avg_sleep_7d       = round(sleep_hours  + random.uniform(-0.5, 0.5), 1) if sleep_hours  else None
+    avg_sleep_rating_7d = round(sleep_rating + random.uniform(-1,   1  ), 1) if sleep_rating else None
 
     # --- FOOD ---
     f = FOOD_SCENARIOS[food_scenario]
-    meals_logged = _rand_int_in_range(f["meals_range"])
-    meal_types = ["breakfast", "lunch", "dinner", "snack"]
+    meals_logged = 0 if _glucose_no_meals else _rand_int_in_range(f["meals_range"])
+    meal_types   = ["breakfast", "lunch", "dinner", "snack"]
     last_meal_type = random.choice(meal_types) if meals_logged > 0 else None
     nutrient_met = f["nutrient_met"]
     nutrient_name = random.choice(["protein", "carbs", "fiber", "calories"]) if nutrient_met else None
-    has_nutrient_goals = food_scenario != "No Food Logging"
+    has_nutrient_goals = f["has_target"]
     total_nutrient_targets = random.randint(2, 4) if has_nutrient_goals else 0
+    days_with_meals = 0 if _glucose_no_meals else f["days_7d"]
 
     # --- MEDICATIONS ---
     m = MED_SCENARIOS[med_scenario]
-    effective_has_meds = has_medications and med_scenario != "No Medications"
-    took_all_meds = m["took_all"]
-    med_adherence_7d = _rand_in_range(m["adherence_range"]) if m["adherence_range"] else None
+    effective_has_meds = m["has_meds"]
+    took_all_meds  = m["took_all"] and not _glucose_no_meds
+    med_adherence_7d = (_rand_in_range(m["adherence_range"]) if m["adherence_range"] else None)
+    if _glucose_no_meds and med_adherence_7d is not None:
+        med_adherence_7d = round(random.uniform(0, 30), 1)
 
     # --- WEIGHT ---
     w = WEIGHT_SCENARIOS[weight_scenario]
-    has_weight_goal = weight_goal_type != "None"
-    weight_logged_yesterday = w["logged_recently"]
-    weight_change_lbs_14d = _rand_in_range(w["change_lbs"]) if w["change_lbs"] else None
-    weight_change_pct = _rand_in_range(w["change_pct"]) if w["change_pct"] else None
-    weight_change_pct_14d = weight_change_pct
-    days_since_weight = random.randint(0, 3) if w["logged_recently"] else random.randint(7, 30)
-    weight_last_7d = days_since_weight <= 7
+    has_weight_goal      = w["has_goal"]
+    wg_type              = w.get("goal_type")           # "lose" / "maintain" / None
+    weight_logged_recently = w["logged_recently"]
+    weight_change_lbs_14d  = _rand_in_range(w["change_lbs"]) if w["change_lbs"] else None
+    weight_change_pct      = _rand_in_range(w["change_pct"]) if w["change_pct"] else None
+    weight_change_pct_14d  = weight_change_pct
+    _days_since_range      = w.get("days_since", (0, 3)) if weight_logged_recently else (7, 30)
+    days_since_weight      = random.randint(*_days_since_range)
+    weight_last_7d  = days_since_weight <= 7
     weight_last_14d = days_since_weight <= 14
     weight_last_30d = days_since_weight <= 30
-    is_within_maintenance = weight_scenario == "Stable (within ±1 lb)"
+    is_within_maintenance = w.get("within_maintenance", False)
 
     # --- MENTAL WELLBEING ---
     mw = MENTAL_WELLBEING_SCENARIOS[mental_scenario]
 
+    # --- EXPLORE ---
+    ex = EXPLORE_SCENARIOS[explore_scenario]
+
     # --- JOURNEY ---
     j = JOURNEY_SCENARIOS[journey_scenario]
 
-    # --- EXERCISE VIDEO ---
-    ev = EXERCISE_VIDEO_SCENARIOS[exercise_video_scenario]
-
-    # --- EXERCISE PROGRAM ---
-    ep = EXERCISE_PROGRAM_SCENARIOS[exercise_program_scenario]
-
-    # Map weight goal dropdown
-    wgt_map = {"None": None, "Lose": "lose", "Maintain": "maintain", "Gain": "gain"}
-    wg_type = wgt_map.get(weight_goal_type)
+    # --- MAP USER FOCUS ---
+    focus_val = user_focus if user_focus else None
 
     # Build the UserContext
     ctx = UserContext(
@@ -265,7 +536,7 @@ def generate_synthetic_context(
         has_weight_goal=has_weight_goal,
         weight_goal_type=wg_type,
         has_active_journey=j["active"],
-        has_exercise_program=ep["active"],
+        has_exercise_program=a["prog_active"],
         user_focus=focus_val,
         a1c_target_group=a1c_group,
         med_reminders_enabled=random.choice([True, False]) if effective_has_meds else False,
@@ -295,7 +566,7 @@ def generate_synthetic_context(
         avg_sleep_rating_7d=avg_sleep_rating_7d,
 
         # Weight
-        weight_logged_yesterday=weight_logged_yesterday,
+        weight_logged_yesterday=weight_logged_recently,
         weight_change_pct=weight_change_pct,
         weight_change_lbs_14d=weight_change_lbs_14d,
         weight_change_pct_14d=weight_change_pct_14d,
@@ -310,7 +581,7 @@ def generate_synthetic_context(
         last_meal_type=last_meal_type,
         any_nutrient_target_met=nutrient_met,
         nutrient_name_met=nutrient_name,
-        days_with_meals_7d=f["days_with_meals_7d"],
+        days_with_meals_7d=days_with_meals,
         has_nutrient_goals=has_nutrient_goals,
         total_nutrient_targets=total_nutrient_targets,
         num_nutrient_targets_90_110=total_nutrient_targets if nutrient_met else 0,
@@ -335,26 +606,30 @@ def generate_synthetic_context(
         active_journey_count=1 if j["active"] else 0,
         completed_journey_count=1 if j["completed_journey"] else 0,
 
-        # Exercise Video
-        exercise_video_completed_today=ev["completed_today"],
-        exercise_video_completed_7d=ev["completed_7d"],
-        has_exercise_video_activity=ev["has_activity"],
-        has_completed_video_ever=ev["completed_7d"],
-        total_videos_completed=random.randint(1, 10) if ev["has_activity"] else 0,
+        # Exercise Video (driven by Explore + Activity scenarios)
+        exercise_video_completed_today=a["vid_today"],
+        exercise_video_completed_7d=a["vid_7d"] or ex["vid_completed_7d"],
+        has_exercise_video_activity=a["vid_today"] or a["vid_7d"],
+        has_completed_video_ever=a["vid_7d"] or ex["vid_completed_7d"],
+        total_videos_completed=random.randint(1, 10) if (a["vid_7d"] or ex["vid_completed_7d"]) else 0,
 
-        # Exercise Program
-        has_active_exercise_program=ep["active"],
-        has_completed_exercise_program=ep["completed_today"],
-        exercise_program_started_today=False,
-        exercise_program_completed_today=ep["completed_today"],
-        exercise_program_progress_today=ep["progress_today"],
-        exercise_program_progress_7d=ep["progress_today"] or ep["active"],
-        active_program_count=1 if ep["active"] else 0,
+        # Exercise Program (driven by Activity scenario)
+        has_active_exercise_program=a["prog_active"],
+        has_completed_exercise_program=a["prog_progress"] == 1.0,
+        exercise_program_started_today=a["prog_active"] and not a["prog_progress"],
+        exercise_program_completed_today=a["prog_progress"] == 1.0,
+        exercise_program_progress_today=a["prog_progress"],
+        exercise_program_progress_7d=a["prog_progress"] or a["prog_active"],
+        active_program_count=1 if a["prog_active"] else 0,
 
-        # Bonus
-        bonus_exercise_video_completed=ev["completed_today"],
-        bonus_exercise_program_started=ep["progress_today"],
+        # Bonus (includes explore / learn signals)
+        bonus_exercise_video_completed=a["vid_today"],
+        bonus_ai_meal_plan=f["ai_plan"],
+        bonus_exercise_program_started=bool(a["prog_active"] and not a["prog_progress"]),
         bonus_grocery_online=random.choice([True, False]),
+        bonus_article_read=ex["content_opened"] and not ex["vid_completed_7d"] and not ex["lesson_completed"],
+        bonus_lesson_completed=ex["lesson_completed"],
+        bonus_video_watched=ex["vid_completed_7d"],
 
         app_login_yesterday=True,
     )
@@ -386,7 +661,7 @@ def run_pipeline(
     InsightGenerator falls back to built-in mock responses.
     """
     if config_path is None:
-        config_path = os.path.join(PARENT_DIR, "prompts.yml")
+        config_path = os.path.join(SRC_DIR, "prompts.yml")
 
     # Set Databricks env vars so the REST client can authenticate
     if databricks_host:
@@ -524,7 +799,7 @@ def get_feature_snapshot(ctx: UserContext) -> Dict[str, Any]:
         "Patient ID": ctx.patient_id,
         "Report Date": ctx.report_date.strftime("%Y-%m-%d"),
         "A1C Target Group": ctx.a1c_target_group.value,
-        "User Focus": ctx.user_focus or "None",
+        "User Focus": ", ".join(ctx.user_focus) if ctx.user_focus else "None",
         # Devices
         "Has CGM": ctx.has_cgm,
         "Has Step Tracker": ctx.has_step_tracker,

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import yaml
+import random
 
 
 class Category(Enum):
@@ -32,6 +33,19 @@ class A1CTargetGroup(Enum):
     DM_TARGET_8 = "dm_target_8"
     DIP = "dip"
     NON_DM = "non_dm"
+
+
+# Canonical mapping: focus display name → internal category names.
+# Internal names must match what _get_action_category() returns.
+FOCUS_CATEGORY_MAP: Dict[str, List[str]] = {
+    'Weight':        ['weight'],
+    'Glucose':       ['glucose'],
+    'Activity':      ['activity', 'steps'],
+    'Eating Habits': ['food'],
+    'Sleep':         ['sleep'],
+    'Medications':   ['medications'],
+    'Anxiety':       ['mental_wellbeing'],
+}
 
 
 # ============================================================================
@@ -162,9 +176,14 @@ class UserContext:
     weight_goal_type: Optional[str] = None  # "lose", "maintain", "gain"
     has_active_journey: bool = False
     has_exercise_program: bool = False
-    user_focus: Optional[str] = None  # "Weight", "Glucose", "Activity", etc.
-    a1c_target_group: A1CTargetGroup = A1CTargetGroup.DM_TARGET_7
+    user_focus: Optional[List[str]] = None  # ["Weight", "Glucose", ...] or None
+    a1c_target_group: Optional[A1CTargetGroup] = None  # None means no A1C target on file
     med_reminders_enabled: bool = False
+
+    @property
+    def effective_a1c_group(self) -> A1CTargetGroup:
+        """Returns the A1C target group, falling back to DM_TARGET_7 when None."""
+        return self.a1c_target_group if self.a1c_target_group is not None else A1CTargetGroup.DM_TARGET_7
     
     # Yesterday's features (from Gold table)
     tir_pct: Optional[float] = None
@@ -338,15 +357,15 @@ class LogicEngine:
         
         # Helper function to check if category should be included
         def should_include_category(category_name: str, has_device: bool = True) -> bool:
-            """Check if category should be included based on focus area and device availability."""
+            """Check if category should be included based on focus area(s) and device availability."""
             if not has_device:
                 return False
             
             # If no focus set, include all available categories
-            if user.user_focus is None or user.user_focus == "":
+            if not user.user_focus:
                 return True
             
-            # Map focus areas to category names (case-insensitive matching)
+            # Map focus areas to category names
             focus_to_category = {
                 'Weight': ['weight'],
                 'Glucose': ['glucose'],
@@ -357,9 +376,10 @@ class LogicEngine:
                 'Anxiety': ['mental_wellbeing']
             }
             
-            # Check if category is included for this focus area
-            for focus_name, categories in focus_to_category.items():
-                if user.user_focus == focus_name and category_name in categories:
+            # Check if category is included for ANY of the user's active focuses
+            for active_focus in user.user_focus:
+                categories = focus_to_category.get(active_focus, [])
+                if category_name in categories:
                     return True
             
             return False
@@ -398,8 +418,8 @@ class LogicEngine:
             max_score += 5
             glucose_rules = scoring.get('glucose', {}).get('scoring_rules', {})
             
-            # Get target group key
-            target_key = user.a1c_target_group.value  # 'a1c_target_7', 'a1c_target_8', etc.
+            # Get target group key (falls back to dm_target_7 when no A1C target on file)
+            target_key = user.effective_a1c_group.value  # 'a1c_target_7', 'a1c_target_8', etc.
             target_rules = glucose_rules.get(target_key, {})
             
             if target_key == 'a1c_target_7':
@@ -577,17 +597,35 @@ class LogicEngine:
         
         return "Hello."
     
+    def _get_focus_weights(self, user: UserContext) -> Dict[str, float]:
+        """
+        Returns a weight for each active focus area.
+
+        Strategy: 'uniform' — all active focuses share equal weight.
+        Future strategies (e.g. primary-focus-heavy, recency-based) can be
+        swapped in here without touching any other code.
+
+        Returns:
+            Dict mapping focus_name → weight.  Weights sum to 1.0.
+        """
+        if not user.user_focus:
+            return {}
+        # STRATEGY: uniform
+        n = len(user.user_focus)
+        return {focus: 1.0 / n for focus in user.user_focus}
+
     def _is_category_allowed(self, category: str, user: UserContext) -> bool:
-        """Check if category is allowed based on user's focus area."""
-        if user.user_focus is None:
+        """Check if category is allowed based on user's focus area(s)."""
+        if not user.user_focus:
             return True
-        
-        focus_key = user.user_focus.lower()
-        if focus_key in self.focus_mappings:
-            allowed = self.focus_mappings[focus_key]['include']
-            return category in allowed
-        
-        return True
+
+        # A category is allowed when it appears in ANY of the user's active focuses.
+        # Uses FOCUS_CATEGORY_MAP (internal names) so 'Eating Habits' → 'food', etc.
+        for focus_name in user.user_focus:
+            if category in FOCUS_CATEGORY_MAP.get(focus_name, []):
+                return True
+
+        return False
     
     def _check_device_requirements(self, action_key: str, user: UserContext) -> bool:
         """Check if user has required devices for an action."""
@@ -637,7 +675,7 @@ class LogicEngine:
         
         # CGM with good TIR boost
         if action_key.startswith('glucose_') and user.has_cgm:
-            thresholds = self.thresholds['glucose'][user.a1c_target_group.value]
+            thresholds = self.thresholds['glucose'][user.effective_a1c_group.value]
             if safe_gte(user.tir_pct, thresholds['tir_positive_threshold']):
                 base_priority += self.priority_rules['cgm_with_good_tir']
         
@@ -651,10 +689,24 @@ class LogicEngine:
         if action_key == 'medication_adherence' and user.has_medications:
             base_priority += self.priority_rules['medications_on_list']
         
-        # User focus area boost
+        # User focus area boost — weighted by focus relevance.
+        # With uniform weighting each matching focus contributes equally;
+        # the total boost equals user_focus_area regardless of how many
+        # focuses the user has (i.e. matching ANY focus gives the full boost).
         category = self._get_action_category(action_key)
-        if user.user_focus and category == user.user_focus.lower():
-            base_priority += self.priority_rules['user_focus_area']
+        if user.user_focus:
+            weights = self._get_focus_weights(user)
+            focus_weight_total = sum(
+                weights.get(focus, 0.0)
+                for focus in user.user_focus
+                if category in FOCUS_CATEGORY_MAP.get(focus, [])
+            )
+            if focus_weight_total > 0:
+                # Scale boost: full boost when at least one focus matches.
+                # Multiply back by n so uniform weights cancel out → always
+                # adds the full 'user_focus_area' point value.
+                n = len(user.user_focus)
+                base_priority += int(self.priority_rules['user_focus_area'] * focus_weight_total * n)
         
         # Not shown in 6 days boost
         if category not in history.categories_shown_last_6d:
@@ -702,7 +754,7 @@ class LogicEngine:
         This is the core logic that evaluates all conditions.
         """
         eligible = []
-        thresholds_glucose = self.thresholds['glucose'][user.a1c_target_group.value]
+        thresholds_glucose = self.thresholds['glucose'][user.effective_a1c_group.value]
         
         # === GLUCOSE ACTIONS ===
         if user.has_cgm:
@@ -894,7 +946,7 @@ class LogicEngine:
         Get list of eligible opportunities (suggestions) based on user's data.
         """
         eligible = []
-        thresholds_glucose = self.thresholds['glucose'][user.a1c_target_group.value]
+        thresholds_glucose = self.thresholds['glucose'][user.effective_a1c_group.value]
         
         # === WEIGHT OPPORTUNITIES ===
         if user.has_weight_goal:
@@ -1125,14 +1177,19 @@ class LogicEngine:
                 action['key'], user, history
             )
         
-        # Sort by priority (higher = better)
-        filtered_actions.sort(key=lambda x: x['priority'], reverse=True)
-        filtered_opportunities.sort(key=lambda x: x.get('priority', 0), reverse=True)
+        # Sort by priority (higher = better).
+        # Random jitter breaks ties so equal-priority categories rotate across days.
+        filtered_actions.sort(
+            key=lambda x: (x['priority'], random.random()), reverse=True
+        )
+        filtered_opportunities.sort(
+            key=lambda x: (x.get('priority', 0), random.random()), reverse=True
+        )
         
         # Special case: CGM with good TIR gets glucose + 1 additional action
         selected_actions = []
         if user.has_cgm:
-            thresholds = self.thresholds['glucose'][user.a1c_target_group.value]
+            thresholds = self.thresholds['glucose'][user.effective_a1c_group.value]
             if safe_gte(user.tir_pct, thresholds['tir_positive_threshold']):
                 # Find glucose action and add it
                 glucose_actions = [a for a in filtered_actions if a['category'] == 'glucose']

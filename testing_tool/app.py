@@ -26,9 +26,8 @@ from backend import (
     MED_SCENARIOS,
     WEIGHT_SCENARIOS,
     MENTAL_WELLBEING_SCENARIOS,
+    EXPLORE_SCENARIOS,
     JOURNEY_SCENARIOS,
-    EXERCISE_VIDEO_SCENARIOS,
-    EXERCISE_PROGRAM_SCENARIOS,
 )
 
 # =============================================================================
@@ -56,13 +55,12 @@ def _ensure_log_file():
         ws.title = "Test Log"
         headers = [
             "Timestamp", "Tester Name",
-            # Config
-            "A1C Target Group", "User Focus", "Weight Goal Type",
-            "Has CGM", "Has Step Tracker", "Has Medications",
-            "Glucose Scenario", "Step Scenario", "Activity Scenario",
-            "Sleep Scenario", "Food Scenario", "Med Scenario",
-            "Weight Scenario", "Mental Wellbeing", "Journey Scenario",
-            "Exercise Video", "Exercise Program",
+            # Config (one column per TestCases.csv column)
+            "User Focus",
+            "Weight (Col B)", "Glucose (Col C)", "Activity (Col D)",
+            "Steps (Col E)", "Food (Col F)", "Sleep (Col G)",
+            "Medications (Col H)", "Mental Well-being (Col I)",
+            "Explore (Col J)", "Journey (Col K)",
             # Model params
             "Temperature", "Max Tokens", "Max Positive Actions", "Greeting",
             # Results
@@ -103,57 +101,32 @@ st.sidebar.markdown("---")
 tester_name = st.sidebar.text_input("Your Name (optional)", placeholder="e.g., Dr. Smith")
 
 st.sidebar.subheader("👤 Patient Profile")
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    a1c_group = st.selectbox(
-        "A1C Target Group",
-        ["DM Target <7%", "DM Target <8%", "DIP (Diabetes in Pregnancy)", "Non-DM"],
-        index=0,
-    )
-with col2:
-    user_focus = st.selectbox(
-        "User Focus Area",
-        ["None", "Weight", "Glucose", "Activity", "Eating Habits", "Sleep", "Medications", "Anxiety"],
-        index=0,
-    )
-
-col3, col4 = st.sidebar.columns(2)
-with col3:
-    weight_goal = st.selectbox("Weight Goal", ["None", "Lose", "Maintain", "Gain"], index=0)
-with col4:
-    greeting_override = st.selectbox("Greeting", ["Auto", "Morning", "Afternoon", "Evening"], index=0)
-
-st.sidebar.subheader("📱 Device / Feature Flags")
-dcol1, dcol2, dcol3 = st.sidebar.columns(3)
-with dcol1:
-    has_cgm = st.checkbox("Has CGM", value=True)
-with dcol2:
-    has_step_tracker = st.checkbox("Step Tracker", value=True)
-with dcol3:
-    has_medications = st.checkbox("Medications", value=True)
+user_focus = st.sidebar.multiselect(
+    "User Focus Areas",
+    ["Weight", "Glucose", "Activity", "Eating Habits", "Sleep", "Medications", "Anxiety"],
+    default=[],
+    help="Leave empty for no focus (all categories included)",
+)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📊 Health Metric Scenarios")
+st.sidebar.subheader("📊 Test Case Scenarios")
+st.sidebar.caption("Each dropdown maps to a column in TestCases.csv")
 
-glucose_scenario = st.sidebar.selectbox("Glucose Performance", list(GLUCOSE_SCENARIOS.keys()), index=1)
-step_scenario = st.sidebar.selectbox("Daily Steps", list(STEP_SCENARIOS.keys()), index=1)
-activity_scenario = st.sidebar.selectbox("Weekly Activity", list(ACTIVITY_SCENARIOS.keys()), index=1)
-sleep_scenario = st.sidebar.selectbox("Sleep Quality", list(SLEEP_SCENARIOS.keys()), index=1)
-food_scenario = st.sidebar.selectbox("Food Logging", list(FOOD_SCENARIOS.keys()), index=1)
-med_scenario = st.sidebar.selectbox("Medication Adherence", list(MED_SCENARIOS.keys()), index=1)
-weight_scenario = st.sidebar.selectbox("Weight Trend", list(WEIGHT_SCENARIOS.keys()), index=1)
-mental_scenario = st.sidebar.selectbox("Mental Wellbeing", list(MENTAL_WELLBEING_SCENARIOS.keys()), index=1)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Engagement Features")
-
-journey_scenario = st.sidebar.selectbox("Journey", list(JOURNEY_SCENARIOS.keys()), index=3)
-exercise_video_scenario = st.sidebar.selectbox("Exercise Video", list(EXERCISE_VIDEO_SCENARIOS.keys()), index=3)
-exercise_program_scenario = st.sidebar.selectbox("Exercise Program", list(EXERCISE_PROGRAM_SCENARIOS.keys()), index=3)
+weight_scenario   = st.sidebar.selectbox("Weight (Col B)",          list(WEIGHT_SCENARIOS.keys()),           index=0)
+glucose_scenario  = st.sidebar.selectbox("Glucose (Col C)",         list(GLUCOSE_SCENARIOS.keys()),          index=1)
+activity_scenario = st.sidebar.selectbox("Activity (Col D)",        list(ACTIVITY_SCENARIOS.keys()),         index=0)
+step_scenario     = st.sidebar.selectbox("Steps (Col E)",           list(STEP_SCENARIOS.keys()),             index=0)
+food_scenario     = st.sidebar.selectbox("Food (Col F)",            list(FOOD_SCENARIOS.keys()),             index=0)
+sleep_scenario    = st.sidebar.selectbox("Sleep (Col G)",           list(SLEEP_SCENARIOS.keys()),            index=0)
+med_scenario      = st.sidebar.selectbox("Medications (Col H)",     list(MED_SCENARIOS.keys()),              index=0)
+mental_scenario   = st.sidebar.selectbox("Mental Well-being (Col I)", list(MENTAL_WELLBEING_SCENARIOS.keys()), index=0)
+explore_scenario  = st.sidebar.selectbox("Explore (Col J)",         list(EXPLORE_SCENARIOS.keys()),          index=0)
+journey_scenario  = st.sidebar.selectbox("Journey (Col K)",         list(JOURNEY_SCENARIOS.keys()),          index=2)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Model Parameters")
 
+greeting_override = st.sidebar.selectbox("Greeting", ["Auto", "Morning", "Afternoon", "Evening"], index=0)
 temperature = st.sidebar.slider("LLM Temperature", 0.0, 1.0, 0.7, 0.05)
 max_tokens = st.sidebar.slider("Max Tokens", 100, 500, 180, 10)
 max_actions = st.sidebar.selectbox("Max Positive Actions", [1, 2, 3], index=1)
@@ -207,23 +180,17 @@ if generate_btn:
     with st.spinner("Generating synthetic patient data and running pipeline..."):
         # Build synthetic context
         user_ctx = generate_synthetic_context(
-            a1c_target_group=a1c_group,
             user_focus=user_focus,
-            weight_goal_type=weight_goal,
-            has_cgm=has_cgm,
-            has_step_tracker=has_step_tracker,
-            has_medications=has_medications,
-            glucose_scenario=glucose_scenario,
-            step_scenario=step_scenario,
-            activity_scenario=activity_scenario,
-            sleep_scenario=sleep_scenario,
-            food_scenario=food_scenario,
-            med_scenario=med_scenario,
             weight_scenario=weight_scenario,
+            glucose_scenario=glucose_scenario,
+            activity_scenario=activity_scenario,
+            step_scenario=step_scenario,
+            food_scenario=food_scenario,
+            sleep_scenario=sleep_scenario,
+            med_scenario=med_scenario,
             mental_scenario=mental_scenario,
+            explore_scenario=explore_scenario,
             journey_scenario=journey_scenario,
-            exercise_video_scenario=exercise_video_scenario,
-            exercise_program_scenario=exercise_program_scenario,
         )
 
         # Run pipeline (credentials loaded from env vars / .env via config.py)
@@ -387,13 +354,12 @@ if result is not None:
         log_row = [
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             tester_name,
-            # Config
-            a1c_group, user_focus, weight_goal,
-            has_cgm, has_step_tracker, has_medications,
-            glucose_scenario, step_scenario, activity_scenario,
-            sleep_scenario, food_scenario, med_scenario,
-            weight_scenario, mental_scenario, journey_scenario,
-            exercise_video_scenario, exercise_program_scenario,
+            # Config (one per TestCases.csv column)
+            ", ".join(user_focus) if user_focus else "None",
+            weight_scenario, glucose_scenario, activity_scenario,
+            step_scenario, food_scenario, sleep_scenario,
+            med_scenario, mental_scenario,
+            explore_scenario, journey_scenario,
             # Model params
             temperature, max_tokens, max_actions, greeting_override,
             # Results
