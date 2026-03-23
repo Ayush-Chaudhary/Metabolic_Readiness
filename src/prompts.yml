@@ -330,7 +330,7 @@ system_prompt: |
   You are a supportive health coach assistant for the SIMON app. Your task is to generate personalized, encouraging health messages.
   
   REQUIREMENTS:
-  1. Aim for approximately 250 words - be concise but thorough.
+  1. Aim for less than 250 words - be concise but thorough.
   2. The message should feel natural, warm, and motivating.
   3. Never use clinical jargon or alarming language.
   4. Do not give medical advice - only encourage positive behaviors.
@@ -340,15 +340,25 @@ system_prompt: |
   - Start with a greeting
   - Acknowledge 1-2 positive actions from yesterday
   - End with one actionable suggestion for today
+  - Say nothing else - no ratings, no generic motivation, no extra commentary.
   
+  READING LEVEL:
+  - Write at a Flesch-Kincaid Grade Level of 5-7. Use simple, punchy, direct language.
+  - No sentence should exceed 12 words. If a sentence has more than one thought, split it into two.
+  - Each sentence must have one clear subject and one clear action.
+  - Do not use "and," "but," or "so" to chain multiple phrases together.
+  - Do not use em-dashes (—) or en-dashes (-). Use a period instead.
+  - Minimize commas. If a comma feels like a pause, use a period instead.
+  - Use words with only 1 or 2 syllables. Avoid all jargon.
+  - If you must use a medical term, immediately follow it with a plain-English explanation in parentheses.
+
   TONE GUIDELINES:
   - Supportive and encouraging, not preachy
-  - Celebrate small wins
   - Make suggestions feel like friendly tips, not commands
   - Use "you" language to make it personal
 
 # -----------------------------------------------------------------------------
-# PROMPT SEGMENTS - Category-specific templates
+# PROMPT SEGMENTS - Instructional guidance for LLM (not exact wording)
 # -----------------------------------------------------------------------------
 prompt_segments:
   
@@ -356,67 +366,67 @@ prompt_segments:
   positive_actions:
     
     glucose_tir_met:
-      template: "Yesterday, your glucose was in target for {tir_pct}% of the day"
+      template: "Praise that their glucose stayed in target range for {tir_pct}% of the day yesterday"
       priority: 1
       requires_cgm: true
       
     glucose_tir_improved:
-      template: "Your glucose time in range improved from {prev_tir}% to {tir_pct}%"
+      template: "Celebrate that their glucose time in range went up from {prev_tir}% to {tir_pct}%"
       priority: 2
       requires_cgm: true
       
     steps_target_met:
-      template: "You took {step_count} steps yesterday"
+      template: "Congratulate them on hitting {step_count} steps yesterday"
       priority: 3
       requires_step_tracker: true
       
     steps_improved:
-      template: "You took {step_count} steps yesterday. That's more than {prev_day_name}!"
+      template: "Celebrate that they walked {step_count} steps yesterday, which is more than {prev_day_name}"
       priority: 4
       requires_step_tracker: true
       
     activity_logged:
-      template: "You logged {active_minutes} active minutes yesterday"
+      template: "Acknowledge they were active for {active_minutes} minutes yesterday"
       priority: 5
       
     activity_maintained:
-      template: "You stayed active with {active_minutes} minutes of exercise"
+      template: "Praise them for staying active with {active_minutes} minutes of exercise"
       priority: 6
       
     sleep_hours_met:
-      template: "You slept {sleep_hours} hours last night"
+      template: "Acknowledge they got {sleep_hours} hours of sleep last night"
       priority: 7
       
     sleep_rating_met:
-      template: "Your sleep rating was {sleep_rating}"
+      template: "Note that their sleep quality rating was {sleep_rating}"
       priority: 8
       
     sleep_improved:
-      template: "You slept more than the night before"
+      template: "Celebrate that they slept more than the previous night"
       priority: 9
       
     medication_adherence:
-      template: "You took all your meds"
+      template: "Praise them for taking all their medications"
       priority: 10
       requires_medications: true
       
     meal_logged:
-      template: "You logged your {meal_type} yesterday. Nice!"
+      template: "Acknowledge they logged their {meal_type} yesterday"
       priority: 11
       
     nutrient_target_met:
-      template: "You reached your {nutrient_name} goal"
+      template: "Congratulate them on meeting their {nutrient_name} target"
       priority: 12
       
     weight_logged:
-      template: "You logged your weight"
+      template: "Acknowledge they logged their weight"
       priority: 13
       requires_weight_goal: true
       max_weekly: 2
       no_back_to_back: true
       
     weight_decreased:
-      template: "Your weight is trending down"
+      template: "Celebrate that their weight is trending downward"
       priority: 14
       requires_weight_goal: true
       goal_type: "lose"
@@ -424,7 +434,7 @@ prompt_segments:
       no_back_to_back: true
       
     weight_maintained:
-      template: "Your weight is staying on track"
+      template: "Praise them for keeping their weight steady and on track"
       priority: 15
       requires_weight_goal: true
       goal_type: "maintain"
@@ -432,27 +442,27 @@ prompt_segments:
       no_back_to_back: true
       
     journey_task_completed:
-      template: "You completed a step in your Journey"
+      template: "Celebrate that they completed a step in their Journey"
       priority: 0  # Highest priority when active
       requires_journey: true
       
     meditation_opened:
-      template: "You took time for meditation"
+      template: "Acknowledge they made time for meditation"
       priority: 16
       category: "mental_wellbeing"
       
     journal_entry:
-      template: "You made a journal entry"
+      template: "Praise them for writing a journal entry"
       priority: 17
       category: "mental_wellbeing"
       
     action_plan_progress:
-      template: "You made progress on your Action Plan"
+      template: "Celebrate that they made progress on their Action Plan"
       priority: 18
       category: "mental_wellbeing"
       
     app_login:
-      template: "Kudos to you for logging in today to work on your health!"
+      template: "Welcome them for logging in and encourage them to keep working on their health"
       priority: 99  # Fallback when no other positive actions
       is_fallback: true
 
@@ -461,138 +471,138 @@ prompt_segments:
     
     # Weight
     weight_log_prompt:
-      template: "Today, log your weight to track your progress."
+      template: "Suggest they log their weight today to track progress"
       category: "weight"
       condition: "days_since_weight > 6"
       
     # Glucose
     glucose_improve_tir:
-      template: "Check out your glucose trends in the app."
+      template: "Encourage them to review their glucose trends in the app"
       category: "glucose"
       requires_cgm: true
       
     glucose_log_food:
-      template: "Log your meals to see how food affects your glucose."
+      template: "Suggest logging meals to see how food impacts their glucose levels"
       category: "glucose"
       requires_cgm: true
       
     glucose_high_protein_fiber:
-      template: "Try eating foods higher in protein and fiber today."
+      template: "Suggest eating foods higher in protein and fiber today"
       category: "glucose"
       requires_cgm: true
       
     glucose_post_meal_walk:
-      template: "Consider taking a walk after eating to help your glucose."
+      template: "Suggest a walk after meals to help with glucose levels"
       category: "glucose"
       requires_cgm: true
       
     glucose_set_carb_goal:
-      template: "Consider setting a daily carb goal in the app."
+      template: "Suggest setting a daily carb goal in the app"
       category: "glucose"
       requires_cgm: true
       
     glucose_contact_provider:
-      template: "Talk to your healthcare provider about managing low glucose."
+      template: "Recommend talking to their healthcare provider about managing low glucose"
       category: "glucose"
       requires_cgm: true
       is_clinical: true
       
     # Activity
     activity_be_active:
-      template: "Try to move more today. Even 10 minutes helps!"
+      template: "Encourage them to be more active today, even just 10 minutes"
       category: "activity"
       
     activity_suggestions:
-      - "Move for 10 minutes each morning."
-      - "Take a walk on your lunch break."
-      - "Take the stairs instead of the elevator."
-      - "Take a walk after dinner."
-      - "Do a workout while watching TV."
-      - "Invite a friend to exercise with you."
+      - "Suggest a short 10-minute morning walk or stretch"
+      - "Suggest a walk during their lunch break"
+      - "Suggest taking the stairs instead of the elevator"
+      - "Suggest an after-dinner walk"
+      - "Suggest a quick workout while watching TV"
+      - "Suggest inviting a friend to exercise together"
       
     activity_exercise_program:
-      template: "Try the next exercise from your exercise program."
+      template: "Encourage them to try the next exercise from their exercise program"
       category: "activity"
       requires_exercise_program: true
       
     activity_exercise_video:
-      template: "Try an exercise video at home today."
+      template: "Suggest trying an exercise video at home"
       category: "activity"
       
     # Steps
     steps_increase:
-      template: "Try to take more steps today. Every step counts!"
+      template: "Encourage them to take more steps today, every step counts"
       category: "steps"
       requires_step_tracker: true
       
     # Food
     food_continue_logging:
-      template: "Keep logging your meals. Go to Food to see yesterday's insights."
+      template: "Encourage continued meal logging and checking the Food section for insights"
       category: "food"
       
     food_start_logging:
-      template: "Try logging your meals today to learn about your eating patterns."
+      template: "Suggest they start logging meals to learn about their eating patterns"
       category: "food"
       
     food_log_lunch:
-      template: "Try logging your lunch, too. Go to the Food section for insights."
+      template: "Suggest also logging lunch and checking the Food section for insights"
       category: "food"
       
     food_nutrient_attention:
-      template: "Log all your food today and check your nutrient totals."
+      template: "Suggest logging all meals today and reviewing their nutrient totals"
       category: "food"
       
     food_healthy_suggestions:
-      - "Eat more vegetables today."
-      - "Try adding more fruits to your day."
-      - "Choose whole grains when you can."
-      - "Drink more water today."
-      - "Try cooking at home tonight."
-      - "Try making your portions a little smaller."
+      - "Suggest eating more vegetables today"
+      - "Suggest adding more fruits to their day"
+      - "Suggest choosing whole grains when possible"
+      - "Suggest drinking more water today"
+      - "Suggest cooking at home tonight"
+      - "Suggest making portions a little smaller"
       
     food_ai_meal_planner:
-      template: "Try the AI meal planner to discover healthy options."
+      template: "Suggest trying the AI meal planner for healthy meal ideas"
       category: "food"
       
     # Sleep
     sleep_continue:
-      template: "Keep up your great sleep habits!"
+      template: "Encourage them to keep up their great sleep habits"
       category: "sleep"
       
     sleep_improvement_suggestions:
-      - "Set an alarm to help you go to bed on time. This might help you get more hours of sleep tonight."
-      - "Try keeping your room cooler tonight."
-      - "Limit screen time before bed tonight."
-      - "Try meditating before bed tonight."
-      - "Eat lighter portions at dinner tonight."
-      - "Limit caffeine this afternoon."
+      - "Suggest setting a bedtime alarm to get more sleep tonight"
+      - "Suggest keeping their room cooler tonight"
+      - "Suggest limiting screen time before bed tonight"
+      - "Suggest meditating before bed tonight"
+      - "Suggest eating lighter portions at dinner tonight"
+      - "Suggest limiting caffeine this afternoon"
       
     sleep_log_prompt:
-      template: "Today, log how you slept last night. You'll learn patterns over time."
+      template: "Suggest logging their sleep to discover patterns over time"
       category: "sleep"
       
     # Medications
     medication_reminders:
-      template: "Set medication reminders to help you stay on track."
+      template: "Suggest setting medication reminders to stay on track"
       category: "medications"
       requires_medications: true
       
     # Mental Well-being
     mental_try_meditation:
-      template: "Try a meditation today to help manage stress."
+      template: "Suggest trying a meditation session to help manage stress"
       category: "mental_wellbeing"
       
     mental_action_plan:
-      template: "Work on an Action Plan today to set goals."
+      template: "Encourage working on an Action Plan to set personal goals"
       category: "mental_wellbeing"
       
     mental_journaling:
-      template: "Try journaling today to reflect on your feelings."
+      template: "Suggest journaling to reflect on their feelings"
       category: "mental_wellbeing"
       
     # Default / Explore
     explore_browse:
-      template: "Browse the Explore section to learn more about managing your health."
+      template: "Suggest browsing the Explore section for health management tips"
       category: "explore"
       is_fallback: true
 
@@ -600,15 +610,15 @@ prompt_segments:
 # USER PROMPT TEMPLATE - Sent to LLM with context
 # -----------------------------------------------------------------------------
 user_prompt_template: |
-  Generate a brief, personalized health message with EXACTLY 2 paragraphs:
+  Generate a brief, personalized health message with EXACTLY 1 paragraph:
   
-  PARAGRAPH 1: Start with "{greeting}" Then acknowledge these positive facts from yesterday:
+  Start with "{greeting}" then weave in these points using your own natural wording:
   {positive_facts_list}
   
-  PARAGRAPH 2: Transition with "Now, looking ahead to today" or similar, then give this suggestion:
+  End with this suggestion (rephrase in your own words):
   {opportunity_suggestion}
   
-  Keep it warm and encouraging. Do NOT add a ratings or generic motivation. Go directly from acknowledgment to suggestion.
+  IMPORTANT: Do NOT copy the instructions above word-for-word. Use them as guidance and write the message in your own natural, conversational voice. Do NOT add ratings or generic motivation. Go directly from acknowledgment to suggestion.
 
 # -----------------------------------------------------------------------------
 # FOCUS AREA MAPPINGS - Which categories apply to each focus

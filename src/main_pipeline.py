@@ -26,7 +26,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import json
 import os
-from databricks import sql
 from mlflow.models.resources import (
   DatabricksServingEndpoint,
   DatabricksTable,
@@ -679,6 +678,8 @@ class MLflowWrapper(PythonModel):
             return oauth_service_principal(config)
         
         # Connect to Databricks SQL Warehouse with M2M authentication
+        # (lazy import: only available in MLflow Model Serving, not on Databricks clusters)
+        from databricks import sql  # noqa: PLC0415
         with sql.connect(
             server_hostname=server_hostname,
             http_path=http_path,

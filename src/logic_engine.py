@@ -868,21 +868,25 @@ class LogicEngine:
             })
         
         # === WEIGHT ACTIONS ===
+        # weight_logged is available regardless of goal.
+        # weight_decreased / weight_maintained require an active goal.
+        # The 2x-per-week / no-back-to-back frequency cap applies only
+        # to goal-specific messages (decreased / maintained), per spec.
+        if user.weight_logged_yesterday:
+            eligible.append({
+                'key': 'weight_logged',
+                'category': 'weight',
+                'data': {}
+            })
+        
         if user.has_weight_goal:
-            # Check weight frequency cap
+            # Frequency cap: max 2x/week, never back-to-back
             can_show_weight = (
                 history.weight_messages_this_week < self.message_history_rules['weight_max_per_week']
                 and not history.weight_shown_yesterday
             )
             
             if can_show_weight:
-                if user.weight_logged_yesterday:
-                    eligible.append({
-                        'key': 'weight_logged',
-                        'category': 'weight',
-                        'data': {}
-                    })
-                
                 if user.weight_goal_type == 'lose' and safe_lt(user.weight_change_pct, 0):
                     eligible.append({
                         'key': 'weight_decreased',
@@ -949,13 +953,14 @@ class LogicEngine:
         thresholds_glucose = self.thresholds['glucose'][user.effective_a1c_group.value]
         
         # === WEIGHT OPPORTUNITIES ===
-        if user.has_weight_goal:
-            if safe_gt(user.days_since_last_weight, self.thresholds['weight']['log_prompt_days']):
-                eligible.append({
-                    'key': 'weight_log_prompt',
-                    'category': 'weight',
-                    'priority': 80 if user.has_weight_goal else 40
-                })
+        # Spec: "If it's been more than 6 days since last weight entry,
+        # gently prompt user to log a weight entry" — no goal requirement.
+        if safe_gt(user.days_since_last_weight, self.thresholds['weight']['log_prompt_days']):
+            eligible.append({
+                'key': 'weight_log_prompt',
+                'category': 'weight',
+                'priority': 80 if user.has_weight_goal else 40
+            })
         
         # === GLUCOSE OPPORTUNITIES ===
         if user.has_cgm:

@@ -13,6 +13,7 @@
 # MAGIC **Dependencies**: PySpark, Delta Lake, Databricks Feature Engineering
 
 # COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## 1. Configuration Section
 # MAGIC All configurable parameters are centralized here
@@ -36,18 +37,18 @@ CONFIG: Dict[str, Any] = {
         "sleep": "bronz_als_azdev24.trxdb_dsmbasedb_observation.sleepentry",
         "med_administration": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medadministration",
         "med_prescription": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescription",
-        "med_schedule": "bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescriptiondayschedule",
+        "med_schedule": "bronz_als_azuat2.trxdb_dsmbasedb_observation.medprescriptiondayschedule",
         "patient_nutrition_goals": "bronz_als_azuat2.trxdb_dsmbasedb_user.patientgoaldetails",
-        "a1c_target": "bronz_als_azdev24.trxdb_dsmbasedb_observation.patienttargetsegment",
-        "journal": "bronz_als_azdev24.trxdb_dsmbasedb_userengagement.userjournal",
-        "grocery": "bronz_als_azdev24.trxdb_dsmbasedb_user.grocerydetails",
-        "action_plan": "bronz_als_azdev24.trxdb_dsmbasedb_user.actionplanprogress",
+        "a1c_target": "bronz_als_azuat2.trxdb_dsmbasedb_observation.patienttargetsegment",
+        "journal": "bronz_als_azuat2.trxdb_dsmbasedb_userengagement.userjournal",
+        "grocery": "bronz_als_azuat2.trxdb_dsmbasedb_user.grocerydetails",
+        "action_plan": "bronz_als_azuat2.trxdb_dsmbasedb_user.actionplanprogress",
         # Note: meditation is derived from the activity table (exercisetype=30045)
         # Journey and exercise tracking tables
-        "journey": "bronz_als_azdev24.trxdb_dsmbasedb_user.GuidedJourneyWeeksAndTasksDetail",
-        "exercise_video": "bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideositemdetail",
-        "exercise_program": "bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideosprogramdetail",
-        "user_focus": "bronz_als_azdev24.trxdb_dsmbasedb_user.customizemyappdetails",
+        "journey": "bronz_als_azuat2.trxdb_dsmbasedb_user.GuidedJourneyWeeksAndTasksDetail",
+        "exercise_video": "bronz_als_azuat2.trxdb_dsmbasedb_user.curatedvideositemdetail",
+        "exercise_program": "bronz_als_azuat2.trxdb_dsmbasedb_user.curatedvideosprogramdetail",
+        "user_focus": "bronz_als_azuat2.trxdb_dsmbasedb_user.customizemyappdetails",
     },
     
     # Target Gold Layer
@@ -578,15 +579,15 @@ def create_weight_features() -> DataFrame:
                         "patientid",
                         "startdate",
                         "targetweight",
-                        "type",
-                        "status",
+                        F.col("type").cast("string").alias("type"),
+                        F.col("status").cast("string").alias("status"),
                         "targetreacheddate"
                     ))
-        
-        # Filter to active goals
-        active_goals = goals_df.filter(
-            F.col("status").isin(CONFIG["status_values"]["active_status"])
-        )
+
+        # Filter to active goals — compare as strings to avoid CAST errors when the
+        # source table stores status as BIGINT and active_status list contains integers.
+        valid_statuses = [str(s) for s in CONFIG["status_values"]["active_status"]]
+        active_goals = goals_df.filter(F.col("status").isin(valid_statuses))
         
         # Get the most recent active goal per patient
         window_latest_goal = Window.partitionBy("patientid").orderBy(F.col("startdate").desc())
@@ -944,7 +945,7 @@ def create_medication_features() -> DataFrame:
         # Determine doses per day from frequencyvalue (default to 1 if unknown)
         active_rx = active_rx.withColumn(
             "doses_per_day",
-            F.coalesce(F.col("frequencyvalue").cast("int"), F.lit(1))
+            F.coalesce(F.expr("try_cast(frequencyvalue as int)"), F.lit(1))
         )
         
         # Get the date each prescription became active (for date-range filtering)
@@ -1061,7 +1062,7 @@ def create_medication_features() -> DataFrame:
                 F.max(
                     F.when(
                         F.col("medicationreminder").isNotNull() &
-                        (F.col("medicationreminder").cast("int") != 0),
+                        (F.expr("try_cast(medicationreminder as int)") != 0),
                         1
                     ).otherwise(0)
                 ).alias("med_reminders_enabled")
@@ -1119,7 +1120,7 @@ def create_journal_features() -> DataFrame:
     """
     
     journal_df = (spark.read.table(get_table_path("journal"))
-                  .select("patientid", "createddatetime"))
+                  .select(F.col("userid").alias("patientid"), "createddatetime"))
     
     journal_df = journal_df.withColumn(
         "local_date", F.to_date("createddatetime")
@@ -1153,15 +1154,15 @@ print("✓ Journal feature function created")
 def create_grocery_features() -> DataFrame:
     """
     Computes daily grocery activity flag from the grocerydetails table.
-    entrydatetimeinmills is epoch milliseconds.
+    entrydatetimeinmillis is epoch milliseconds.
     """
     
     grocery_df = (spark.read.table(get_table_path("grocery"))
-                  .select("patientid", "entrydatetimeinmills"))
+                  .select("patientid", "entrydatetimeinmillis"))
     
     grocery_df = grocery_df.withColumn(
         "local_date",
-        F.to_date(F.from_unixtime(F.col("entrydatetimeinmills") / 1000))
+        F.to_date(F.from_unixtime(F.col("entrydatetimeinmillis") / 1000))
     )
     
     grocery_daily = grocery_df.groupBy("patientid", "local_date").agg(
@@ -1187,17 +1188,17 @@ def create_action_plan_features() -> DataFrame:
     """
     
     action_plan_df = (spark.read.table(get_table_path("action_plan"))
-                      .select("patientid", "actionplanstatus", "createddate", "timezoneoffset"))
+                      .select("patientid", "statusid", "createddate", "timezoneoffset"))
     
     action_plan_df = add_local_date(action_plan_df, "createddate")
     
     # Filter out deleted plans
-    action_plan_df = action_plan_df.filter(F.col("actionplanstatus") != 3)
+    action_plan_df = action_plan_df.filter(F.col("statusid") != 3)
     
     action_plan_daily = action_plan_df.groupBy("patientid", "local_date").agg(
         F.count("*").alias("action_plan_entries"),
-        F.max(F.when(F.col("actionplanstatus") == 1, 1).otherwise(0)).alias("action_plan_active"),
-        F.max(F.when(F.col("actionplanstatus") == 2, 1).otherwise(0)).alias("action_plan_completed_today"),
+        F.max(F.when(F.col("statusid") == 1, 1).otherwise(0)).alias("action_plan_active"),
+        F.max(F.when(F.col("statusid") == 2, 1).otherwise(0)).alias("action_plan_completed_today"),
     )
     
     # Rolling 7-day and 30-day progress flags
@@ -1369,7 +1370,7 @@ def create_exercise_program_features() -> DataFrame:
     
     program_df = (spark.read.table(get_table_path("exercise_program"))
                   .select("patientid", "statusid", "activateddatetime", 
-                          "createddatetime", "modifieddatetime"))
+                          "createddate", "modifieddate"))
     
     # Create local dates for different events
     program_df = program_df.withColumn(
@@ -1377,10 +1378,10 @@ def create_exercise_program_features() -> DataFrame:
         F.to_date("activateddatetime")
     ).withColumn(
         "created_date",
-        F.to_date("createddatetime")
+        F.to_date("createddate")
     ).withColumn(
         "modified_date",
-        F.to_date("modifieddatetime")
+        F.to_date("modifieddate")
     )
     
     # Patient-level summary (current status)
@@ -1505,7 +1506,10 @@ def create_focus_features() -> DataFrame:
     # Parse the myfocusdata JSON array
     focus_parsed = customize_df.select(
         F.col("patientid"),
-        F.explode(F.col("myfocusdata")).alias("focus_item")
+        F.from_json(F.col("myfocusdata"), "array<struct<MyFocusID:int,IsMyFocus:int,FocusOptionID:int>>").alias("focus_array")
+    ).select(
+        F.col("patientid"),
+        F.explode(F.col("focus_array")).alias("focus_item")
     ).select(
         F.col("patientid"),
         F.col("focus_item.MyFocusID").alias("focus_id"),
@@ -1541,6 +1545,201 @@ def create_focus_features() -> DataFrame:
     return focus_agg.select("patientid", "user_focus")
 
 print("✓ Focus feature function created")
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## 10h. Column-Level Metadata Comments
+
+# COMMAND ----------
+
+def add_column_comments(table_path: str) -> None:
+    """
+    Applies column-level COMMENT metadata to every column in the Gold feature table.
+
+    Each comment follows the pattern:
+        [schema.table] Human-readable description of the column.
+
+    The schema abbreviation is derived by splitting the fully-qualified source table
+    path on '_' and taking the **last** segment (e.g.
+    ``trxdb_dsmbasedb_observation`` → ``observation``).
+
+    The comments are stored as Delta table metadata and are visible in:
+      - ``DESCRIBE TABLE EXTENDED``
+      - Databricks catalog / data explorer UI
+      - Databricks Feature Engineering UI
+    """
+
+    # (column_name, comment_string)
+    # comment format: "[schema_last.table] description"
+    COLUMN_COMMENTS = [
+        # ── Identity ──────────────────────────────────────────────────────────
+        ("patientid",              "[user.patient] Unique patient identifier (primary key component)."),
+        ("report_date",            "[pipeline] Calendar date this feature row represents (partition key)."),
+
+        # ── Glucose (elogbgentry) ──────────────────────────────────────────────
+        ("glucose_reading_count",  "[observation.elogbgentry] Number of blood-glucose readings logged on this day."),
+        ("tir_pct",                "[observation.elogbgentry] Percentage of readings within target range (70–180 mg/dL)."),
+        ("glucose_high_pct",       "[observation.elogbgentry] Percentage of readings above 180 mg/dL (hyperglycaemia)."),
+        ("glucose_low_pct",        "[observation.elogbgentry] Percentage of readings below 70 mg/dL (hypoglycaemia)."),
+        ("glucose_very_low_pct",   "[observation.elogbgentry] Percentage of readings below 54 mg/dL (severe hypoglycaemia)."),
+        ("has_cgm_connected",      "[observation.elogbgentry] 1 if any reading came from a CGM device (externalsourceid=18)."),
+        ("avg_glucose",            "[observation.elogbgentry] Mean blood-glucose value (mg/dL) across all readings that day."),
+        ("tir_pct_delta_1d",       "[observation.elogbgentry] Day-over-day change in time-in-range percentage."),
+
+        # ── Activity (elogexerciseentry) ───────────────────────────────────────
+        ("active_minutes",         "[observation.elogexerciseentry] Total exercise duration logged (minutes)."),
+        ("exercise_session_count", "[observation.elogexerciseentry] Number of distinct exercise sessions logged."),
+        ("exercise_variety_count", "[observation.elogexerciseentry] Number of distinct exercise types logged."),
+        ("active_minutes_delta_1d","[observation.elogexerciseentry] Day-over-day change in active minutes."),
+        ("active_minutes_7d_sum",  "[observation.elogexerciseentry] Rolling 7-day sum of active minutes (vs 150-min weekly target)."),
+        ("active_min_same_or_more","[observation.elogexerciseentry] 1 if active minutes ≥ previous day (within 3-min tolerance)."),
+
+        # ── Steps (stepentry) ─────────────────────────────────────────────────
+        ("daily_step_count",       "[observation.stepentry] Total steps recorded on this day."),
+        ("daily_step_count_delta_1d","[observation.stepentry] Day-over-day change in step count."),
+        ("daily_step_count_avg_7d","[observation.stepentry] Rolling 7-day average daily step count."),
+        ("steps_more_than_prev",   "[observation.stepentry] 1 if today's steps exceed the previous day."),
+        ("has_step_tracker",       "[observation.stepentry] 1 if patient has any step data (tracker connected)."),
+        ("steps_target_met",       "[observation.stepentry] 1 if daily_step_count ≥ 10 000 (daily target)."),
+
+        # ── Weight (elogweightentry + weightgoal) ─────────────────────────────
+        ("weight_lbs",             "[observation.elogweightentry] Body weight recorded on this day (lbs)."),
+        ("weight_lbs_delta",       "[observation.elogweightentry] Change in weight vs. the previous recorded entry (lbs)."),
+        ("weight_change_pct",      "[observation.elogweightentry] Percentage change in weight vs. previous entry."),
+        ("days_since_last_weight", "[observation.elogweightentry] Calendar days elapsed since the most recent weight entry."),
+        ("weight_logged_today",    "[observation.elogweightentry] 1 if at least one weight reading was logged on this day."),
+        ("has_weight_goal",        "[observation.weightgoal] 1 if patient has an active weight goal."),
+        ("weight_goal_type",       "[observation.weightgoal] Goal type: 'lose', 'gain', or 'maintain' (from weightgoal.type)."),
+        ("is_within_maintenance_range","[observation.weightgoal] 1 if weight is within ±3% of maintenance target weight."),
+        ("distance_from_goal",     "[observation.weightgoal] Current weight minus target weight (lbs); positive = above target."),
+
+        # ── Food (foodmoduleitem + patientgoaldetails) ─────────────────────────
+        ("total_food_entries",     "[observation.foodmoduleitem] Total individual food items logged on this day."),
+        ("unique_meals_logged",    "[observation.foodmoduleitem] Number of distinct meal slots logged (activitytypeid)."),
+        ("total_calories",         "[observation.foodmoduleitem] Total calories consumed (kcal)."),
+        ("total_protein",          "[observation.foodmoduleitem] Total protein consumed (g)."),
+        ("total_carbs",            "[observation.foodmoduleitem] Total carbohydrates consumed (g)."),
+        ("total_fat",              "[observation.foodmoduleitem] Total fat consumed (g)."),
+        ("total_fiber",            "[observation.foodmoduleitem] Total dietary fibre consumed (g)."),
+        ("total_sugar",            "[observation.foodmoduleitem] Total sugar consumed (g)."),
+        ("meal_logged_today",      "[observation.foodmoduleitem] 1 if at least one meal was logged on this day."),
+        ("days_with_meals_7d",     "[observation.foodmoduleitem] Number of days in the past 7 with at least one meal logged."),
+        ("any_nutrient_target_met","[user.patientgoaldetails] 1 if any tracked nutrient was within 90–110% of the daily goal."),
+        ("calories_pct_of_goal",   "[user.patientgoaldetails] Today's calorie intake as a percentage of the patient's goal."),
+        ("protein_pct_of_goal",    "[user.patientgoaldetails] Today's protein intake as a percentage of the patient's goal."),
+        ("carbs_pct_of_goal",      "[user.patientgoaldetails] Today's carbohydrate intake as a percentage of the patient's goal."),
+        ("fat_pct_of_goal",        "[user.patientgoaldetails] Today's fat intake as a percentage of the patient's goal."),
+
+        # ── Sleep (sleepentry) ────────────────────────────────────────────────
+        ("sleep_duration_hours",   "[observation.sleepentry] Total sleep duration on this day (hours); bucketed by wake-up time (enddatetime)."),
+        ("sleep_rating",           "[observation.sleepentry] Average patient-reported sleep quality rating."),
+        ("sleep_entry_count",      "[observation.sleepentry] Number of sleep sessions recorded on this day."),
+        ("sleep_duration_hours_delta_1d","[observation.sleepentry] Day-over-day change in sleep duration (hours)."),
+        ("sleep_rating_delta_1d",  "[observation.sleepentry] Day-over-day change in sleep quality rating."),
+        ("sleep_duration_hours_avg_7d","[observation.sleepentry] Rolling 7-day average sleep duration (hours)."),
+        ("sleep_rating_avg_7d",    "[observation.sleepentry] Rolling 7-day average sleep quality rating."),
+        ("sleep_hours_target_met", "[observation.sleepentry] 1 if sleep_duration_hours ≥ 7 (target)."),
+        ("sleep_rating_target_met","[observation.sleepentry] 1 if sleep_rating ≥ 7 (target)."),
+        ("slept_more_than_prev",   "[observation.sleepentry] 1 if today's sleep duration exceeds the previous day."),
+        ("rating_better_than_prev","[observation.sleepentry] 1 if today's sleep rating exceeds the previous day."),
+
+        # ── Medications (medadministration + medprescription + medprescriptiondayschedule) ─
+        ("meds_taken_count",       "[observation.medadministration] Total medication doses taken (statusid=1) on this day."),
+        ("active_prescription_count","[observation.medprescription] Number of active prescriptions for the patient."),
+        ("expected_daily_doses",   "[observation.medprescription] Total expected doses per day across all active prescriptions."),
+        ("med_adherence_pct_1d",   "[observation.medadministration] Per-medication capped adherence % for today (100% = all doses taken)."),
+        ("took_all_meds",          "[observation.medadministration] 1 if med_adherence_pct_1d = 100 (all doses taken)."),
+        ("med_adherence_7d_avg",   "[observation.medadministration] Rolling 7-day average medication adherence percentage."),
+        ("med_reminders_enabled",  "[observation.medprescriptiondayschedule] 1 if the patient has at least one reminder configured."),
+
+        # ── Meditation (elogexerciseentry, exercisetype=30045) ─────────────────
+        ("meditation_count",       "[observation.elogexerciseentry] Number of meditation sessions logged today (exercisetype=30045)."),
+        ("meditation_opened_today","[observation.elogexerciseentry] 1 if patient opened a meditation session today."),
+        ("meditation_opened_7d",   "[observation.elogexerciseentry] 1 if patient opened any meditation session in the past 7 days."),
+        ("meditation_opened_30d",  "[observation.elogexerciseentry] 1 if patient opened any meditation session in the past 30 days."),
+
+        # ── Journal (userjournal) ──────────────────────────────────────────────
+        ("journal_entry_count",    "[userengagement.userjournal] Number of journal entries written on this day."),
+        ("journal_entry_today",    "[userengagement.userjournal] 1 if at least one journal entry was written today."),
+        ("journal_entry_7d",       "[userengagement.userjournal] 1 if at least one journal entry was written in the past 7 days."),
+        ("journal_entry_30d",      "[userengagement.userjournal] 1 if at least one journal entry was written in the past 30 days."),
+
+        # ── Grocery (grocerydetails) ───────────────────────────────────────────
+        ("grocery_entry_count",    "[user.grocerydetails] Number of grocery items added on this day."),
+        ("grocery_shopped_today",  "[user.grocerydetails] 1 if any grocery activity was recorded today."),
+
+        # ── Action Plan (actionplanprogress) ──────────────────────────────────
+        ("action_plan_entries",    "[user.actionplanprogress] Total action plan records created on this day."),
+        ("action_plan_active",     "[user.actionplanprogress] 1 if patient has an active (statusid=1) action plan today."),
+        ("action_plan_completed_today","[user.actionplanprogress] 1 if an action plan was completed (statusid=2) today."),
+        ("action_plan_progress_7d","[user.actionplanprogress] 1 if any action plan activity occurred in the past 7 days."),
+        ("action_plan_progress_30d","[user.actionplanprogress] 1 if any action plan activity occurred in the past 30 days."),
+
+        # ── A1C Target (patienttargetsegment) ─────────────────────────────────
+        ("a1c_target_group",       "[observation.patienttargetsegment] Patient's A1C target group: 'dm_target_7' (<7%), 'dm_target_8' (<8%), or 'dm_target_6' (<6%). NULL = not set."),
+
+        # ── Journey (GuidedJourneyWeeksAndTasksDetail) ─────────────────────────
+        ("has_active_journey",     "[user.GuidedJourneyWeeksAndTasksDetail] 1 if patient currently has at least one active guided journey (isjourneycompleted=1)."),
+        ("has_completed_journey",  "[user.GuidedJourneyWeeksAndTasksDetail] 1 if patient has ever completed a guided journey."),
+        ("active_journey_count",   "[user.GuidedJourneyWeeksAndTasksDetail] Number of journeys currently in active status."),
+        ("completed_journey_count","[user.GuidedJourneyWeeksAndTasksDetail] Number of journeys the patient has completed."),
+        ("journey_task_completed", "[user.GuidedJourneyWeeksAndTasksDetail] 1 if patient has both active and completed items (proxy for task completion)."),
+
+        # ── Exercise Video (curatedvideositemdetail) ───────────────────────────
+        ("videos_completed_count", "[user.curatedvideositemdetail] Number of exercise videos marked completed on this day."),
+        ("exercise_video_completed_today","[user.curatedvideositemdetail] 1 if at least one exercise video was completed today."),
+        ("exercise_video_completed_7d",   "[user.curatedvideositemdetail] 1 if at least one exercise video was completed in the past 7 days."),
+        ("has_completed_video_ever",      "[user.curatedvideositemdetail] 1 if patient has ever completed an exercise video."),
+        ("total_videos_completed",        "[user.curatedvideositemdetail] Lifetime count of exercise videos completed by the patient."),
+        ("has_exercise_video_activity",   "[user.curatedvideositemdetail] 1 if patient has any exercise video records at all."),
+
+        # ── Exercise Program (curatedvideosprogramdetail) ─────────────────────
+        ("programs_started_count",        "[user.curatedvideosprogramdetail] Number of exercise programs activated on this day."),
+        ("programs_completed_count",      "[user.curatedvideosprogramdetail] Number of exercise programs completed on this day."),
+        ("exercise_program_started_today","[user.curatedvideosprogramdetail] 1 if any exercise program was started/activated today."),
+        ("exercise_program_completed_today","[user.curatedvideosprogramdetail] 1 if any exercise program was completed today."),
+        ("exercise_program_progress_today","[user.curatedvideosprogramdetail] 1 if any program was started or completed today."),
+        ("exercise_program_progress_7d",  "[user.curatedvideosprogramdetail] 1 if any program activity occurred in the past 7 days."),
+        ("has_active_exercise_program",   "[user.curatedvideosprogramdetail] 1 if patient currently has an active exercise program (statusid=1)."),
+        ("has_completed_exercise_program","[user.curatedvideosprogramdetail] 1 if patient has ever completed an exercise program."),
+        ("active_program_count",          "[user.curatedvideosprogramdetail] Number of programs currently in active status."),
+        ("total_programs",                "[user.curatedvideosprogramdetail] Lifetime count of exercise programs for the patient."),
+
+        # ── User Focus (customizemyappdetails) ────────────────────────────────
+        ("user_focus",             "[user.customizemyappdetails] Comma-separated list of active focus areas chosen by the patient "
+                                   "(e.g. 'Weight,Glucose,Activity'). NULL if none selected. "
+                                   "Values: Medications | Glucose | Eating Habits | Activity | Sleep | Weight | Anxiety."),
+
+        # ── Eligibility Arrays ─────────────────────────────────────────────────
+        ("eligible_positive_actions","[pipeline] Array of positive-action codes this patient earned today "
+                                     "(e.g. ['GLUCOSE_TIR_MET','STEPS_TARGET_MET']). Computed from feature flags."),
+        ("eligible_opportunities",   "[pipeline] Array of opportunity codes signalling areas for improvement "
+                                     "(e.g. ['FOOD_LOG_MEAL','SLEEP_INCREASE_DURATION']). Computed from feature flags."),
+
+        # ── Pipeline Metadata ─────────────────────────────────────────────────
+        ("created_at",      "[pipeline] Timestamp when this feature row was written to the Gold table."),
+        ("feature_version", "[pipeline] Version identifier for the feature engineering logic applied to this row."),
+    ]
+
+    print("\n📝 Applying column-level comments...")
+    failed_cols = []
+    for col_name, comment in COLUMN_COMMENTS:
+        # Escape single quotes inside comments
+        safe_comment = comment.replace("'", "\\'")
+        try:
+            spark.sql(
+                f"ALTER TABLE {table_path} ALTER COLUMN `{col_name}` COMMENT '{safe_comment}'"
+            )
+        except Exception:
+            # Column may not exist if a feature table was empty (e.g. no weight goals)
+            failed_cols.append(col_name)
+
+    ok_count = len(COLUMN_COMMENTS) - len(failed_cols)
+    print(f"  ✓ {ok_count}/{len(COLUMN_COMMENTS)} column comments applied")
+    if failed_cols:
+        print(f"  ⚠ Skipped (column absent): {failed_cols}")
+
+print("✓ Column-comment function created")
 
 # COMMAND ----------
 # MAGIC %md
@@ -1965,7 +2164,10 @@ def execute_feature_store_creation():
     spark.sql(f"OPTIMIZE {gold_table_path} ZORDER BY (patientid)")
     print("  ✓ Table optimized")
     
-    # Step 7: Register with Feature Store (if desired)
+    # Step 7: Add column-level comments (lineage + description)
+    add_column_comments(gold_table_path)
+
+    # Step 8: Register with Feature Store (if desired)
     try:
         from databricks.feature_engineering import FeatureEngineeringClient
         fe = FeatureEngineeringClient()

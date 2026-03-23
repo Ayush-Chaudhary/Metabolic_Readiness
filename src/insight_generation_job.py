@@ -16,8 +16,8 @@
 
 # COMMAND ----------
 
-# %pip install -U --quiet pyyaml databricks-sdk
-# dbutils.library.restartPython()
+%pip install -U --quiet pyyaml databricks-sdk
+dbutils.library.restartPython()
 
 # COMMAND ----------
 # MAGIC %md
@@ -55,10 +55,10 @@ JOB_CONFIG: Dict[str, Any] = {
     },
 
     # Prompts / config file (Databricks Workspace path)
-    "prompts_config_path": "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/prompts.yml",
+    "prompts_config_path": "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src/prompts.yml",
 
     # Code directory (where logic_engine.py and insight_generator.py live)
-    "code_path": "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/src",
+    "code_path": "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src",
 }
 
 def full_table(cfg: dict) -> str:
