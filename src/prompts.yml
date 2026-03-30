@@ -14,8 +14,16 @@
 model:
   endpoint_name: "llama-3-3-70b"  # Foundation Model endpoint
   max_tokens: 180  # Shorter output for 2 paragraphs (~80-100 words)
-  temperature: 0.7
+  temperature: 0.5
   top_p: 0.9
+
+# -----------------------------------------------------------------------------
+# VALIDATION CONFIGURATION - Post-generation language quality check
+# -----------------------------------------------------------------------------
+validation:
+  enabled: true  # Set to false to disable the validation LLM call
+  temperature: 0.3  # Lower temperature for deterministic corrections
+  max_tokens: 200
 
 # -----------------------------------------------------------------------------
 # MESSAGE CONSTRAINTS
@@ -236,26 +244,15 @@ scoring_criteria:
     learn_video_watched: 1       # User watched a Learn video
 
 # -----------------------------------------------------------------------------
-# GREETINGS - Time-based
+# GREETINGS - Generic (not time-based)
 # -----------------------------------------------------------------------------
 greetings:
-  morning:
-    hours: [5, 6, 7, 8, 9, 10, 11]
-    options:
-      - "Good morning."
-      - "Good morning!"
-      
-  afternoon:
-    hours: [12, 13, 14, 15, 16, 17]
-    options:
-      - "Good afternoon."
-      - "Good afternoon!"
-      
-  evening:
-    hours: [18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4]
-    options:
-      - "Hello."
-      - "Good evening."
+  options:
+    - "Hey there."
+    - "Hi!"
+    - "Hello!"
+    - "Hope you're doing well."
+    - "Great to see you."
 
 # -----------------------------------------------------------------------------
 # CLINICAL THRESHOLDS - A1C Target Groups
@@ -356,6 +353,16 @@ system_prompt: |
   - Supportive and encouraging, not preachy
   - Make suggestions feel like friendly tips, not commands
   - Use "you" language to make it personal
+  
+  CLINICAL LANGUAGE RULES:
+  - Never say "You had a great day yesterday." We only know the data the user logged or synced.
+  - Never say "you took a big step" for completing a Journey task. Use "nice work" or "well done" instead.
+  - Do NOT describe a TIR (time in range) change as a "big step," "big improvement," or "huge progress" unless the change exceeds 15 percentage points. For smaller changes, say "improvement" or "progress."
+  - Do NOT say "you're doing something right" when a user's glucose is below their target.
+  - When mentioning meditation, explicitly refer to trying a guided meditation in the app.
+  - Never use the word "healthcare" as one word. Always write it as two separate words: "health care".
+  - Use exactly one space after a period. Never use double spaces.
+  - Do not start any sentence with the word "Now". Restructure the thought into the previous sentence or choose a different opener.
 
 # -----------------------------------------------------------------------------
 # PROMPT SEGMENTS - Instructional guidance for LLM (not exact wording)
@@ -421,7 +428,6 @@ prompt_segments:
     weight_logged:
       template: "Acknowledge they logged their weight"
       priority: 13
-      requires_weight_goal: true
       max_weekly: 2
       no_back_to_back: true
       
@@ -460,6 +466,31 @@ prompt_segments:
       template: "Celebrate that they made progress on their Action Plan"
       priority: 18
       category: "mental_wellbeing"
+      
+    exercise_program_started:
+      template: "Celebrate that they started or made progress on an exercise program"
+      priority: 6
+      category: "activity"
+      
+    ai_meal_plan_generated:
+      template: "Acknowledge that they generated an AI meal plan"
+      priority: 12
+      category: "food"
+      
+    article_read:
+      template: "Praise them for reading a health article"
+      priority: 19
+      category: "explore"
+      
+    video_watched:
+      template: "Acknowledge they watched a health video"
+      priority: 20
+      category: "explore"
+      
+    lesson_completed:
+      template: "Praise them for completing a health lesson"
+      priority: 20
+      category: "explore"
       
     app_login:
       template: "Welcome them for logging in and encourage them to keep working on their health"
@@ -507,6 +538,22 @@ prompt_segments:
       requires_cgm: true
       is_clinical: true
       
+    glucose_take_medication:
+      template: "Encourage the user to take their glycemic-lowering medication as prescribed to help improve their glucose"
+      category: "glucose"
+      requires_cgm: true
+      
+    glucose_contact_provider_prescribed:
+      template: "Encourage the user to reach out to their healthcare provider to discuss their glucose management since they are taking their medication and logging meals"
+      category: "glucose"
+      requires_cgm: true
+      is_clinical: true
+      
+    glucose_pay_attention:
+      template: "Encourage the user to pay attention to their glucose today to try to understand when their glucose goes out of range"
+      category: "glucose"
+      requires_cgm: true
+      
     # Activity
     activity_be_active:
       template: "Encourage them to be more active today, even just 10 minutes"
@@ -553,16 +600,22 @@ prompt_segments:
       category: "food"
       
     food_healthy_suggestions:
-      - "Suggest eating more vegetables today"
-      - "Suggest adding more fruits to their day"
-      - "Suggest choosing whole grains when possible"
-      - "Suggest drinking more water today"
-      - "Suggest cooking at home tonight"
-      - "Suggest making portions a little smaller"
-      
-    food_ai_meal_planner:
-      template: "Suggest trying the AI meal planner for healthy meal ideas"
-      category: "food"
+      - template: "Suggest eating more vegetables today"
+        key: "food_healthy_vegetables"
+      - template: "Suggest adding more fruits to their day"
+        key: "food_healthy_fruits"
+      - template: "Suggest choosing whole grains when possible"
+        key: "food_healthy_whole_grains"
+      - template: "Suggest drinking more water today"
+        key: "food_healthy_water"
+      - template: "Suggest cooking at home tonight"
+        key: "food_healthy_cook_home"
+      - template: "Suggest making portions a little smaller"
+        key: "food_healthy_smaller_portions"
+      - template: "Suggest trying the AI meal planner for healthy meal ideas"
+        key: "food_healthy_ai_meal_planner"
+      - template: "Suggest trying a new healthy recipe"
+        key: "food_healthy_new_recipe"
       
     # Sleep
     sleep_continue:
@@ -570,12 +623,32 @@ prompt_segments:
       category: "sleep"
       
     sleep_improvement_suggestions:
-      - "Suggest setting a bedtime alarm to get more sleep tonight"
-      - "Suggest keeping their room cooler tonight"
-      - "Suggest limiting screen time before bed tonight"
-      - "Suggest meditating before bed tonight"
-      - "Suggest eating lighter portions at dinner tonight"
-      - "Suggest limiting caffeine this afternoon"
+      - template: "Suggest setting a bedtime alarm to get more sleep tonight"
+        key: "sleep_improvement_bedtime_alarm"
+      - template: "Suggest keeping their room cooler tonight"
+        key: "sleep_improvement_cool_room"
+      - template: "Suggest limiting screen time before bed tonight"
+        key: "sleep_improvement_screen_time"
+      - template: "Suggest trying a guided meditation in the app before bed tonight"
+        key: "sleep_improvement_meditate"
+      - template: "Suggest eating lighter portions at dinner tonight"
+        key: "sleep_improvement_lighter_dinner"
+      - template: "Suggest limiting caffeine this afternoon"
+        key: "sleep_improvement_limit_caffeine"
+      - template: "Suggest exercising more during the day to improve sleep"
+        key: "sleep_improvement_exercise"
+      - template: "Suggest making their room darker tonight"
+        key: "sleep_improvement_darker_room"
+      - template: "Suggest making their room quieter tonight"
+        key: "sleep_improvement_quieter_room"
+      - template: "Suggest listening to calm music before bed"
+        key: "sleep_improvement_calm_music"
+      - template: "Suggest setting a sleep schedule and sticking to it"
+        key: "sleep_improvement_schedule"
+      - template: "Suggest trying a relaxing bath before bed"
+        key: "sleep_improvement_bath"
+      - template: "Suggest limiting alcohol before bed"
+        key: "sleep_improvement_limit_alcohol"
       
     sleep_log_prompt:
       template: "Suggest logging their sleep to discover patterns over time"
@@ -625,7 +698,7 @@ user_prompt_template: |
 # -----------------------------------------------------------------------------
 focus_area_mappings:
   weight:
-    include: ["weight", "food", "activity", "steps", "sleep"]
+    include: ["weight", "glucose", "food", "activity", "steps", "sleep"]
     
   glucose:
     include: ["glucose", "food", "activity", "medications"]
@@ -653,7 +726,7 @@ priority_rules:
   journey_active: 100
   cgm_with_good_tir: 90
   weight_goal_active: 80
-  medications_on_list: 70
+  medications_on_list: 0  # Disabled per clinical feedback: was causing over-indexing on medication adherence
   user_focus_area: 60
   not_shown_6_days: 50
   variety: 40

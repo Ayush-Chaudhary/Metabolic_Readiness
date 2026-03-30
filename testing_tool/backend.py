@@ -110,47 +110,71 @@ GLUCOSE_SCENARIOS = {
     },
     "DM (A1C <7): TIR <70%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7",
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
     },
     "DM (A1C <7): TIR <70% + No meals": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7", "no_meals": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
     },
-    "DM (A1C <7): TIR <70% + No meds": {
-        "has_cgm": True, "a1c_hint": "DM_TARGET_7", "no_meds": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    # Branch 2: take your medication (low_pct capped at 3 so safety guard doesn't suppress)
+    "DM (A1C <7): TIR <70% + Glycemic med (not taking)": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "has_glycemic_med": True, "glycemic_not_taking": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 3),
+    },
+    # Branch 3: contact provider (taking med but TIR still off; min_meals=2 ensures condition fires)
+    "DM (A1C <7): TIR <70% + Glycemic med (taking)": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_7",
+        "has_glycemic_med": True, "glycemic_not_taking": False, "min_meals": 2,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 8),
     },
     "DM (A1C <8): TIR <50%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_8",
-        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (0, 1),
     },
     "DM (A1C <8): TIR <50% + No meals": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_8", "no_meals": True,
-        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (0, 1),
     },
-    "DM (A1C <8): TIR <50% + No meds": {
-        "has_cgm": True, "a1c_hint": "DM_TARGET_8", "no_meds": True,
-        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (2, 8),
+    # Branch 2: take your medication (low_pct at most 1 — DM_TARGET_8 threshold is 1%, safe_gt is strict)
+    "DM (A1C <8): TIR <50% + Glycemic med (not taking)": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "has_glycemic_med": True, "glycemic_not_taking": True,
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (0, 1),
+    },
+    # Branch 3: contact provider
+    "DM (A1C <8): TIR <50% + Glycemic med (taking)": {
+        "has_cgm": True, "a1c_hint": "DM_TARGET_8",
+        "has_glycemic_med": True, "glycemic_not_taking": False, "min_meals": 2,
+        "tir_range": (10, 49), "high_pct_range": (30, 60), "low_pct_range": (0, 1),
     },
     "DIP: TIR <70%": {
         "has_cgm": True, "a1c_hint": "DIP",
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 5),
     },
     "DIP: TIR <70% + No meals": {
         "has_cgm": True, "a1c_hint": "DIP", "no_meals": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 5),
     },
-    "DIP: TIR <70% + No meds": {
-        "has_cgm": True, "a1c_hint": "DIP", "no_meds": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (2, 8),
+    # Branch 2: take your medication (low_pct capped at 4 — DIP threshold is 5%)
+    "DIP: TIR <70% + Glycemic med (not taking)": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "has_glycemic_med": True, "glycemic_not_taking": True,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
+    },
+    # Branch 3: contact provider
+    "DIP: TIR <70% + Glycemic med (taking)": {
+        "has_cgm": True, "a1c_hint": "DIP",
+        "has_glycemic_med": True, "glycemic_not_taking": False, "min_meals": 2,
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
     },
     "Non-DM: TIR <90%": {
         "has_cgm": True, "a1c_hint": "NON_DM",
-        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (1, 5),
+        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (0, 1),
     },
     "Non-DM: TIR <90% + No meals": {
         "has_cgm": True, "a1c_hint": "NON_DM", "no_meals": True,
-        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (1, 5),
+        "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (0, 1),
     },
     "DM (A1C <7): High >25%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7",
@@ -438,9 +462,12 @@ def generate_synthetic_context(
     glucose_high_pct = _rand_in_range(g["high_pct_range"]) if g["high_pct_range"] else None
     glucose_low_pct  = _rand_in_range(g["low_pct_range"])  if g["low_pct_range"]  else None
 
-    # Glucose "no_meals" / "no_meds" flags (affect food/med sections below)
-    _glucose_no_meals = g.get("no_meals", False)
-    _glucose_no_meds  = g.get("no_meds",  False)
+    # Glucose "no_meals" / "no_meds" / glycemic med flags (affect food/med sections below)
+    _glucose_no_meals      = g.get("no_meals",           False)
+    _glucose_no_meds       = g.get("no_meds",            False)
+    _has_glycemic_med      = g.get("has_glycemic_med",   False)
+    _glycemic_not_taking   = g.get("glycemic_not_taking", False)
+    _glucose_min_meals     = g.get("min_meals",           0)
 
     # --- STEPS ---
     s = STEP_SCENARIOS[step_scenario]
@@ -480,7 +507,9 @@ def generate_synthetic_context(
 
     # --- FOOD ---
     f = FOOD_SCENARIOS[food_scenario]
-    meals_logged = 0 if _glucose_no_meals else _rand_int_in_range(f["meals_range"])
+    # _glucose_min_meals lets a glucose scenario guarantee ≥N meals are logged
+    # (needed so the "taking med but TIR off → contact provider" branch condition fires)
+    meals_logged = 0 if _glucose_no_meals else max(_glucose_min_meals, _rand_int_in_range(f["meals_range"]))
     meal_types   = ["breakfast", "lunch", "dinner", "snack"]
     last_meal_type = random.choice(meal_types) if meals_logged > 0 else None
     nutrient_met = f["nutrient_met"]
@@ -505,7 +534,8 @@ def generate_synthetic_context(
     weight_change_lbs_14d  = _rand_in_range(w["change_lbs"]) if w["change_lbs"] else None
     weight_change_pct      = _rand_in_range(w["change_pct"]) if w["change_pct"] else None
     weight_change_pct_14d  = weight_change_pct
-    _days_since_range      = w.get("days_since", (0, 3)) if weight_logged_recently else (7, 30)
+    # Prefer explicit days_since from the scenario; if absent, infer from logged_recently
+    _days_since_range      = w.get("days_since") or ((0, 3) if weight_logged_recently else (7, 30))
     days_since_weight      = random.randint(*_days_since_range)
     weight_last_7d  = days_since_weight <= 7
     weight_last_14d = days_since_weight <= 14
@@ -591,6 +621,10 @@ def generate_synthetic_context(
         # Medications
         took_all_meds=took_all_meds,
         med_adherence_7d_avg=med_adherence_7d,
+
+        # Glycemic-lowering medication flags (driven by glucose scenario)
+        takes_glycemic_lowering_med=_has_glycemic_med,
+        glycemic_med_adherent=(not _glycemic_not_taking) if _has_glycemic_med else False,
 
         # Mental wellbeing
         meditation_opened_30d=mw["meditation"],
@@ -830,6 +864,8 @@ def get_feature_snapshot(ctx: UserContext) -> Dict[str, Any]:
         # Meds
         "Took All Meds": ctx.took_all_meds,
         "Med Adherence 7d": ctx.med_adherence_7d_avg,
+        "Takes Glycemic Med": ctx.takes_glycemic_lowering_med,
+        "Glycemic Med Adherent": ctx.glycemic_med_adherent,
         # Weight
         "Weight Logged Yesterday": ctx.weight_logged_yesterday,
         "Weight Change (lbs 14d)": ctx.weight_change_lbs_14d,

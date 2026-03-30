@@ -60,13 +60,13 @@ This is where **focus areas** matter. Every category asks: *"Should I include th
 
 | Focus Area | Categories Included in Scoring |
 |---|---|
-| Weight | Weight |
-| Glucose | Glucose |
-| Activity | Activity, Steps |
-| Eating Habits | Food Logging, Nutrient Targets |
-| Sleep | Sleep Duration, Sleep Rating |
-| Medications | Medications |
-| Anxiety | Mental Well-being |
+| Weight | Weight, Food Logging, Nutrient Targets, Activity, Steps, Sleep Duration, Sleep Rating |
+| Glucose | Glucose, Food Logging, Nutrient Targets, Activity, Medications |
+| Activity | Activity, Steps, Sleep Duration, Sleep Rating |
+| Eating Habits | Food Logging, Nutrient Targets, Weight |
+| Sleep | Sleep Duration, Sleep Rating, Activity |
+| Medications | Medications, Glucose |
+| Anxiety | Mental Well-being, Sleep Duration, Sleep Rating, Activity |
 
 A patient with both `Weight` and `Sleep` active would be scored only on Weight, Sleep Duration, and Sleep Rating — the other categories are skipped and don't affect their max score (so the percentage is still fair).
 
@@ -130,12 +130,17 @@ After finding all qualifying actions, any action whose category is **not** in th
 Same process, but for the *suggestion* part of the message. The engine checks conditions like:
 
 - **Weight** — hasn't logged weight in 6+ days
-- **Glucose** — TIR below target, or too much time in high/low range
+- **Glucose** — TIR below target, or too much time in high/low range. Uses a 4-branch decision tree:
+  1. No meals logged → suggest logging food first
+  2. Takes glycemic-lowering med but non-adherent → suggest taking medication
+  3. Takes glycemic-lowering med, adherent, 2+ meals logged → suggest contacting provider
+  4. Otherwise → suggest paying closer attention to glucose
 - **Activity** — fewer than 150 active minutes this week
 - **Steps** — daily average below 6,000
 - **Food** — didn't log food yesterday, or has nutrient goals they're not hitting
-- **Sleep** — average under 7 hours or average rating under 7 over the past week
-- **Medications** — less than 50% adherence in last 7 days + no reminders set
+- **Sleep** — average under 7 hours or average rating under 7 over the past week. The engine pre-selects a specific suggestion (from 13 keyed options like `consistent_schedule`, `limit_caffeine`, `wind_down_routine`, etc.) and rotates through them based on message history to ensure variety.
+- **Food (healthy eating)** — when the patient already logs food and meets targets, the engine can surface a healthy eating tip instead (from 8 keyed suggestions like `rainbow_plate`, `whole_grains`, `healthy_fats`, etc.), also rotated for variety.
+- **Medications** — less than 50% adherence in last 7 days + no reminders set. Skipped entirely if the patient took all their meds yesterday.
 - **Mental Well-being** — hasn't opened a meditation / journaled / touched an action plan in 30 days
 
 If absolutely nothing qualifies, it defaults to "browse the Explore section."
@@ -151,7 +156,7 @@ base priority
 + Journey boost (if action is a Journey task completion)
 + CGM/good TIR boost (if glucose is on track and patient has CGM)
 + Weight goal boost (if patient has weight goal and action is food/activity/sleep/steps)
-+ Medication boost (if patient has medications on list)
++ Medication boost — **currently disabled** (set to 0; was +70, removed based on clinical review)
 + Focus area boost (if action's category matches one of the patient's active focuses)
 + "Not seen in 6 days" boost (variety — surface things the patient hasn't seen recently)
 − Streak penalty (if patient is already excelling in this category 3 days in a row, deprioritize it)
@@ -168,7 +173,8 @@ Equal-priority ties are broken with a **random jitter**, so the same patient doe
 After ranking, the engine picks:
 
 - **Up to 2 positive actions** (with **category variety** — it tries not to pick two things from the same category)
-- **Special CGM rule**: if the patient has a CGM and TIR is good, glucose is always included as one of the two actions (per requirements)
+- **Special CGM rule**: if the patient has a CGM and TIR **met the target OR improved from the previous day**, glucose is always included as one of the two actions (per requirements)
+- **Focus filter fallback**: if focus-area filtering eliminates *all* qualifying actions or opportunities, the engine falls back to the unfiltered list so the patient always gets content
 - **1 opportunity** (just the top-ranked one)
 
 **Weight capping rule** is also enforced here:
@@ -189,6 +195,14 @@ The engine returns a `SelectedContent` object containing:
 
 The AI (LLaMA 3.3 70B) then takes this structured input and writes the final ~100-word, 2-paragraph message. It only does the creative writing — all the decisions about *what* to write about have already been made by the logic engine.
 
+### Greeting randomisation
+
+The greeting ("Good morning", "Hey there", etc.) is now chosen at random from an expanded pool (6 morning, 5 afternoon, 5 evening options) instead of always using the first option.
+
+### Optional validation pass (Step 7b)
+
+After the AI writes the message, an optional **validation LLM call** (toggleable via `validation.enabled` in `prompts.yml`) reviews the output for spelling errors, run-on sentences, excessive dashes, grammar issues, and reading level. If anything is wrong it returns a corrected version; otherwise the original is kept. This adds one extra LLM call per message when enabled.
+
 ---
 
 ## Does This Match the Original Requirements?
@@ -203,12 +217,12 @@ The AI (LLaMA 3.3 70B) then takes this structured input and writes the final ~10
 | Exclude CGM actions without CGM | ✅ | `has_device=user.has_cgm` guard |
 | Exclude steps actions without step tracker | ✅ | `has_device=user.has_step_tracker` guard |
 | Weight shown max 2×/week, never back-to-back | ✅ | `MessageHistory` + `get_eligible_positive_actions()` |
-| CGM with good TIR → always include + extra action | ✅ | `select_content()` special CGM block |
+| CGM with TIR met target **or improved** → always include | ✅ | `select_content()` CGM block (expanded) |
 | A1C-based glucose thresholds (7%, 8%, DIP, non-DM) | ✅ | `A1CTargetGroup` + `clinical_thresholds` config |
 | Prioritize Journey actions | ✅ | `journey_active` priority boost (+100) |
 | Prioritize glucose for CGM users | ✅ | `cgm_with_good_tir` boost (+90) |
 | Prioritize food/activity/sleep for weight goal users | ✅ | `weight_goal_active` boost (+80) |
-| Prioritize medications for patients with meds list | ✅ | `medications_on_list` boost (+70) |
+| Prioritize medications for patients with meds list | ⏸️ Disabled | `medications_on_list` set to 0 (clinical review) |
 | Prioritize focus-area actions | ✅ | `user_focus_area` boost (+60) |
 | Prioritize actions not shown in last 6 days | ✅ | `not_shown_6_days` boost (+50) |
 | Deprioritize category if excelling 3 days in a row | ✅ | `streak_override_days` penalty (−30) |
@@ -216,12 +230,23 @@ The AI (LLaMA 3.3 70B) then takes this structured input and writes the final ~10
 | Fall back to "browse Explore" if no opportunities | ✅ | `explore_browse` default |
 | Fall back to "kudos for logging in" if no actions | ✅ | `app_login` fallback |
 | Bonus points for extra activities (video, meal plan, etc.) | ✅ | Bonus section in `calculate_daily_rating()` |
+| Medication opportunity guard (skip if took all meds) | ✅ | `get_eligible_opportunities()` |
+| Glucose 4-branch decision tree | ✅ | `get_eligible_opportunities()` glucose section |
+| Sleep suggestion pre-selection with variety rotation | ✅ | `_pick_sleep_suggestion()` |
+| Food healthy-eating suggestion pre-selection | ✅ | `_pick_food_healthy_suggestion()` |
+| Greeting randomisation from expanded pool | ✅ | `get_greeting()` + `random.choice()` |
+| Post-generation validation LLM (toggleable) | ✅ | `_validate_message()` in `insight_generator.py` |
+| Focus filter fallback (never return empty) | ✅ | `select_content()` fallback logic |
+| New positive actions (exercise, AI meal plan, article, video, lesson) | ✅ | `get_eligible_positive_actions()` + templates |
 
 ### Gaps / Placeholders
 
 | Item | Status |
 |---|---|
-| Article read / lesson completed / video watched bonus | ⚠️ Placeholder — requires a content interaction table not yet available |
-| AI meal plan generated detection | ⚠️ Placeholder — not yet in Gold table |
+| Article read / lesson completed / video watched bonus | ⚠️ Templates & logic added — requires content interaction table in Gold table to activate |
+| AI meal plan generated detection | ⚠️ Template added — detection field not yet in Gold table |
+| Exercise program started detection | ⚠️ Template added — detection field not yet in Gold table |
+| Glycemic-lowering med flag (`takes_glycemic_lowering_med`) | ⚠️ Placeholder field in `UserContext` (defaults to False) — needs med-class lookup table |
+| Glycemic med adherence flag (`glycemic_med_adherent`) | ⚠️ Placeholder field in `UserContext` (defaults to False) — needs Gold table wiring |
 | Focus area weighting (primary vs secondary) | ⚠️ Uniform for now — infrastructure to swap strategy is in place in `_get_focus_weights()` |
 | 3-day streak detection per category | ⚠️ `category_streaks` is loaded from history but streak population logic in Gold table pipeline needs verification |

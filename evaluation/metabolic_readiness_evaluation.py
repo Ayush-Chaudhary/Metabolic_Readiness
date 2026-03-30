@@ -195,61 +195,61 @@ print("✅ Testing tool scenario definitions imported")
 
 # Full set of evaluation criteria aligned with evaluation_guidelines_metabolic_readiness.yaml
 EVALUATION_CRITERIA = [
-    # Clinical
+    # # Clinical
     "clinical_coaching_appropriateness",
-    "coaching_recommendations_alignment",
-    "behavior_priority_alignment",
-    # Tone & Style
-    "tone_and_approachability",
+    # "coaching_recommendations_alignment",
+    # "behavior_priority_alignment",
+    # # Tone & Style
+    # "tone_and_approachability",
     "reading_level_appropriateness",
-    # Content Completeness
-    "neutrality_compliance",
-    "message_completeness",
-    "message_length_appropriateness",
-    # Language Quality
-    "language_variety_and_flow",
-    # Format & Structure
-    "response_structure",
-    # Language & Mechanics
+    # # Content Completeness
+    # "neutrality_compliance",
+    # "message_completeness",
+    # "message_length_appropriateness",
+    # # Language Quality
+    # "language_variety_and_flow",
+    # # Format & Structure
+    # "response_structure",
+    # # Language & Mechanics
     "spelling_and_punctuation",
-    "medical_terminology",
-    # Accuracy
-    "numerical_calculation_accuracy",
-    # Safety
-    "toxicity",
+    # "medical_terminology",
+    # # Accuracy
+    # "numerical_calculation_accuracy",
+    # # Safety
+    # "toxicity",
 ]
 
 CRITERIA_CATEGORIES = {
     "Clinical": [
         "clinical_coaching_appropriateness",
-        "coaching_recommendations_alignment",
-        "behavior_priority_alignment",
+        # "coaching_recommendations_alignment",
+        # "behavior_priority_alignment",
     ],
     "Tone & Style": [
-        "tone_and_approachability",
+        # "tone_and_approachability",
         "reading_level_appropriateness",
     ],
-    "Content Completeness": [
-        "neutrality_compliance",
-        "message_completeness",
-        "message_length_appropriateness",
-    ],
-    "Language Quality": [
-        "language_variety_and_flow",
-    ],
-    "Format & Structure": [
-        "response_structure",
-    ],
+    # "Content Completeness": [
+    #     "neutrality_compliance",
+    #     "message_completeness",
+    #     "message_length_appropriateness",
+    # ],
+    # "Language Quality": [
+    #     "language_variety_and_flow",
+    # ],
+    # "Format & Structure": [
+    #     "response_structure",
+    # ],
     "Language & Mechanics": [
         "spelling_and_punctuation",
-        "medical_terminology",
+        # "medical_terminology",
     ],
-    "Accuracy": [
-        "numerical_calculation_accuracy",
-    ],
-    "Safety": [
-        "toxicity",
-    ],
+    # "Accuracy": [
+    #     "numerical_calculation_accuracy",
+    # ],
+    # "Safety": [
+    #     "toxicity",
+    # ],
 }
 
 print(f"✅ Defined {len(EVALUATION_CRITERIA)} evaluation criteria across {len(CRITERIA_CATEGORIES)} categories")

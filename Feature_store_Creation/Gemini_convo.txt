@@ -58,7 +58,6 @@ If user is excelling in one category for 3 days in a row and they have another q
 If user has a qualifying positive action that they have not had in the last 6 days, prioritize showing that positive action
 If user has an active Journey, prioritize showing positive actions from Journey category more than other categories 
 If user has an active weight loss goal or an active weight maintenance goal, prioritize showing positive actions from the Food, Activity, Steps (when step tracker is connected) and Sleep categories more than other categories
-If user has medications on their Medications List, prioritize showing positive actions from the Medications category more often than other categories 
 If no summary/entries give positive reinforcement for logging into app 
 
 Provide 1 suggestion from 1 area of opportunity. 
@@ -147,6 +146,8 @@ Glucose
 For DM users with A1C target <7: TIR was less than 70%; for DM users with A1C target <8: TIR was less than 50%; for DIP users: TIR was less than 70%; for nonDM user: TIR was less than 90%
 If user has not logged more than one meal at least one day in past 7 days, encourage user to log food and drinks to see their impact on their glucose
 If user takes a glycemic-lowering medication and has not been taking it as prescribed, encourage user to take medication as prescribed
+If user is taking glycemic-lowering medication as prescribed and is logging at least two meals a day, encourage user to reach out to their health care provider
+If neither scenario is met, encourage user to pay attention to their glucose today to try to understand when their glucose goes out of range
 For DM users with A1C target <7: time spent in High is >25%; for DM users with A1C target <8: time spent in High is >50%; for DIP users: time spent in High is >25%; for nonDM user: time spent in Above Target is >5%
 Encourage user to eat foods that are higher in protein and fiber
 Encourage user to consider setting a carb or sugar daily nutrient goal if they do not already have one

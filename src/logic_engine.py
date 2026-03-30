@@ -37,14 +37,15 @@ class A1CTargetGroup(Enum):
 
 # Canonical mapping: focus display name → internal category names.
 # Internal names must match what _get_action_category() returns.
+# Must stay in sync with focus_area_mappings in prompts.yml.
 FOCUS_CATEGORY_MAP: Dict[str, List[str]] = {
-    'Weight':        ['weight'],
-    'Glucose':       ['glucose'],
-    'Activity':      ['activity', 'steps'],
-    'Eating Habits': ['food'],
-    'Sleep':         ['sleep'],
-    'Medications':   ['medications'],
-    'Anxiety':       ['mental_wellbeing'],
+    'Weight':        ['weight', 'glucose', 'food', 'activity', 'steps', 'sleep'],
+    'Glucose':       ['glucose', 'food', 'activity', 'medications'],
+    'Activity':      ['activity', 'steps', 'sleep'],
+    'Eating Habits': ['food', 'weight'],
+    'Sleep':         ['sleep', 'activity'],
+    'Medications':   ['medications', 'glucose'],
+    'Anxiety':       ['mental_wellbeing', 'sleep', 'activity'],
 }
 
 
@@ -179,6 +180,10 @@ class UserContext:
     user_focus: Optional[List[str]] = None  # ["Weight", "Glucose", ...] or None
     a1c_target_group: Optional[A1CTargetGroup] = None  # None means no A1C target on file
     med_reminders_enabled: bool = False
+    
+    # Glycemic-lowering medication flags
+    takes_glycemic_lowering_med: bool = False   # User has a glycemic-lowering medication prescribed
+    glycemic_med_adherent: bool = False          # User is taking glycemic-lowering med as prescribed
 
     @property
     def effective_a1c_group(self) -> A1CTargetGroup:
@@ -365,15 +370,18 @@ class LogicEngine:
             if not user.user_focus:
                 return True
             
-            # Map focus areas to category names
+            # Map focus areas to scoring category names.
+            # Must stay in sync with FOCUS_CATEGORY_MAP and focus_area_mappings
+            # in prompts.yml.  Note: scoring category names differ from action
+            # category names (e.g. 'food_logging' vs 'food').
             focus_to_category = {
-                'Weight': ['weight'],
-                'Glucose': ['glucose'],
-                'Activity': ['activity', 'steps'],
-                'Eating Habits': ['food_logging', 'nutrient_targets'],
-                'Sleep': ['sleep_duration', 'sleep_rating'],
-                'Medications': ['medications'],
-                'Anxiety': ['mental_wellbeing']
+                'Weight': ['weight', 'glucose', 'food_logging', 'nutrient_targets', 'activity', 'steps', 'sleep_duration', 'sleep_rating'],
+                'Glucose': ['glucose', 'food_logging', 'nutrient_targets', 'activity', 'medications'],
+                'Activity': ['activity', 'steps', 'sleep_duration', 'sleep_rating'],
+                'Eating Habits': ['food_logging', 'nutrient_targets', 'weight'],
+                'Sleep': ['sleep_duration', 'sleep_rating', 'activity'],
+                'Medications': ['medications', 'glucose'],
+                'Anxiety': ['mental_wellbeing', 'sleep_duration', 'sleep_rating', 'activity']
             }
             
             # Check if category is included for ANY of the user's active focuses
@@ -586,16 +594,10 @@ class LogicEngine:
         # Default fallback
         return self.ratings['ready']['name'], self.ratings['ready']['description']
     
-    def get_greeting(self, hour: int = None) -> str:
-        """Get appropriate greeting based on time of day."""
-        if hour is None:
-            hour = datetime.now().hour
-        
-        for period, data in self.greetings.items():
-            if hour in data['hours']:
-                return data['options'][0]
-        
-        return "Hello."
+    def get_greeting(self) -> str:
+        """Get a generic greeting, randomized for variety."""
+        options = self.greetings.get('options', ["Hey there."])
+        return random.choice(options)
     
     def _get_focus_weights(self, user: UserContext) -> Dict[str, float]:
         """
@@ -679,15 +681,19 @@ class LogicEngine:
             if safe_gte(user.tir_pct, thresholds['tir_positive_threshold']):
                 base_priority += self.priority_rules['cgm_with_good_tir']
         
-        # Weight goal boost for related categories
+        # Weight goal boost for related categories.
+        # Spec: "prioritize Food, Activity, Steps and Sleep" — we include 'weight'
+        # itself so that weight_decreased / weight_maintained can compete for a slot
+        # when there is an active weight goal (the frequency cap handles over-showing).
         if user.has_weight_goal:
             category = self._get_action_category(action_key)
-            if category in ['food', 'activity', 'steps', 'sleep']:
+            if category in ['weight', 'food', 'activity', 'steps', 'sleep']:
                 base_priority += self.priority_rules['weight_goal_active']
         
-        # Medication boost
-        if action_key == 'medication_adherence' and user.has_medications:
-            base_priority += self.priority_rules['medications_on_list']
+        # Medication boost — REMOVED per clinical feedback:
+        # "This is causing the messages to overindex on medication adherence"
+        # if action_key == 'medication_adherence' and user.has_medications:
+        #     base_priority += self.priority_rules['medications_on_list']
         
         # User focus area boost — weighted by focus relevance.
         # With uniform weighting each matching focus contributes equally;
@@ -725,15 +731,20 @@ class LogicEngine:
             'glucose_': 'glucose',
             'steps_': 'steps',
             'activity_': 'activity',
+            'exercise_program_': 'activity',
             'sleep_': 'sleep',
             'medication_': 'medications',
             'meal_': 'food',
             'nutrient_': 'food',
+            'ai_meal_plan_': 'food',
             'weight_': 'weight',
             'journey_': 'journey',
             'meditation_': 'mental_wellbeing',
             'journal_': 'mental_wellbeing',
             'action_plan_': 'mental_wellbeing',
+            'article_': 'explore',
+            'video_': 'explore',
+            'lesson_': 'explore',
             'app_': 'explore',
         }
         
@@ -931,6 +942,44 @@ class LogicEngine:
                 'data': {}
             })
         
+        # === BONUS ACTIVITIES AS POSITIVE ACTIONS ===
+        # These are surfaced as selectable positive actions (not just scoring bonuses)
+        # so the LLM can acknowledge them in the coaching message.
+        if user.exercise_program_started_today or user.exercise_program_progress_today:
+            eligible.append({
+                'key': 'exercise_program_started',
+                'category': 'activity',
+                'data': {}
+            })
+        
+        if user.bonus_ai_meal_plan:
+            eligible.append({
+                'key': 'ai_meal_plan_generated',
+                'category': 'food',
+                'data': {}
+            })
+        
+        if user.bonus_article_read:
+            eligible.append({
+                'key': 'article_read',
+                'category': 'explore',
+                'data': {}
+            })
+        
+        if user.bonus_video_watched:
+            eligible.append({
+                'key': 'video_watched',
+                'category': 'explore',
+                'data': {}
+            })
+        
+        if user.bonus_lesson_completed:
+            eligible.append({
+                'key': 'lesson_completed',
+                'category': 'explore',
+                'data': {}
+            })
+        
         # === FALLBACK: APP LOGIN ===
         if len(eligible) == 0:
             eligible.append({
@@ -964,20 +1013,46 @@ class LogicEngine:
         
         # === GLUCOSE OPPORTUNITIES ===
         if user.has_cgm:
-            # TIR below target
+            # TIR below target — clinical decision tree per updated requirements
             if safe_lt(user.tir_pct, thresholds_glucose['tir_opportunity_threshold']):
-                eligible.append({
-                    'key': 'glucose_improve_tir',
-                    'category': 'glucose',
-                    'priority': 90
-                })
-                
-                # Suggest food logging if not logging
+                # NOTE: glucose_improve_tir is NOT added as a standalone item here.
+                # The decision tree below always produces exactly one specific coaching
+                # message (log food / take medication / contact provider / pay attention).
+                # Adding glucose_improve_tir (priority 90) alongside these (priority 82-96)
+                # caused it to silently win in branches 1, 3, and 4.
+
+                # Decision tree for glucose area-of-opportunity coaching:
+                # 1. Not logging food → encourage food logging to see glucose impact
                 if safe_lt(user.days_with_meals_7d, 1):
                     eligible.append({
                         'key': 'glucose_log_food',
                         'category': 'glucose',
+                        'priority': 88
+                    })
+                # 2. Takes glycemic-lowering med but not as prescribed → take med
+                #    (only when the TIR issue is NOT driven by low glucose — encouraging
+                #     a glucose-lowering drug when the patient already has lows is unsafe)
+                elif (user.takes_glycemic_lowering_med and not user.glycemic_med_adherent
+                      and not safe_gt(user.glucose_low_pct, thresholds_glucose['low_time_max_pct'])):
+                    eligible.append({
+                        'key': 'glucose_take_medication',
+                        'category': 'glucose',
+                        'priority': 96  # Must outrank glucose_contact_provider (95)
+                    })
+                # 3. Takes glycemic-lowering med as prescribed AND logging ≥2 meals → contact provider
+                elif (user.takes_glycemic_lowering_med and user.glycemic_med_adherent
+                      and safe_gte(user.meals_logged_count, 2)):
+                    eligible.append({
+                        'key': 'glucose_contact_provider_prescribed',
+                        'category': 'glucose',
                         'priority': 85
+                    })
+                # 4. Neither scenario → encourage paying attention to glucose
+                else:
+                    eligible.append({
+                        'key': 'glucose_pay_attention',
+                        'category': 'glucose',
+                        'priority': 82
                     })
             
             # Too much time in high
@@ -1034,13 +1109,27 @@ class LogicEngine:
                 })
         
         # === FOOD OPPORTUNITIES ===
+        food_opportunity_added = False
         if safe_gte(user.meals_logged_count, 1):
-            # Logged yesterday - encourage continuation
-            eligible.append({
-                'key': 'food_continue_logging',
-                'category': 'food',
-                'priority': 50
-            })
+            if user.has_nutrient_goals and not user.any_nutrient_target_met:
+                # Logging but not hitting nutrient targets
+                eligible.append({
+                    'key': 'food_nutrient_attention',
+                    'category': 'food',
+                    'priority': 55
+                })
+                food_opportunity_added = True
+            else:
+                # Logging food and either meeting targets or no targets set —
+                # offer a general healthy eating suggestion per requirements
+                suggestion = self._pick_food_healthy_suggestion(history)
+                eligible.append({
+                    'key': suggestion['key'],
+                    'category': 'food',
+                    'priority': 50,
+                    'text_override': suggestion['template']
+                })
+                food_opportunity_added = True
         elif safe_eq(user.days_with_meals_7d, 0):
             # No logging in past week
             eligible.append({
@@ -1048,12 +1137,16 @@ class LogicEngine:
                 'category': 'food',
                 'priority': 60
             })
+            food_opportunity_added = True
         
-        if user.has_nutrient_goals and not user.any_nutrient_target_met:
+        if not food_opportunity_added:
+            # None of the above criteria met — offer general healthy suggestion
+            suggestion = self._pick_food_healthy_suggestion(history)
             eligible.append({
-                'key': 'food_nutrient_attention',
+                'key': suggestion['key'],
                 'category': 'food',
-                'priority': 55
+                'priority': 45,
+                'text_override': suggestion['template']
             })
         
         # === SLEEP OPPORTUNITIES ===
@@ -1064,12 +1157,23 @@ class LogicEngine:
                     'category': 'sleep',
                     'priority': 40
                 })
+            else:
+                # Good duration but low rating — pre-select a specific improvement tip
+                suggestion = self._pick_sleep_suggestion(history)
+                eligible.append({
+                    'key': suggestion['key'],
+                    'category': 'sleep',
+                    'priority': 65,
+                    'text_override': suggestion['template']
+                })
         elif user.avg_sleep_hours_7d is not None:  # Has data but below target
-            # Need more sleep - add random suggestion
+            # Need more sleep — pre-select a specific improvement tip
+            suggestion = self._pick_sleep_suggestion(history)
             eligible.append({
-                'key': 'sleep_improvement',
+                'key': suggestion['key'],
                 'category': 'sleep',
-                'priority': 70
+                'priority': 70,
+                'text_override': suggestion['template']
             })
         elif user.sleep_duration_hours is None:  # No sleep logged
             eligible.append({
@@ -1080,34 +1184,45 @@ class LogicEngine:
         
         # === MEDICATION OPPORTUNITIES ===
         if user.has_medications:
-            if safe_lt(user.med_adherence_7d_avg, self.thresholds['medication']['adherence_opportunity_pct']):
-                if not user.med_reminders_enabled:
-                    eligible.append({
-                        'key': 'medication_reminders',
-                        'category': 'medications',
-                        'priority': 80
-                    })
+            # Guard: Don't suggest reminders if user took all meds yesterday
+            # (even if 7d average is low — yesterday's adherence is the relevant signal)
+            if (safe_lt(user.med_adherence_7d_avg, self.thresholds['medication']['adherence_opportunity_pct'])
+                    and not user.med_reminders_enabled
+                    and not user.took_all_meds):
+                eligible.append({
+                    'key': 'medication_reminders',
+                    'category': 'medications',
+                    'priority': 80
+                })
         
         # === MENTAL WELL-BEING OPPORTUNITIES ===
+        # Boost priority when the user's focus is Anxiety — mental wellbeing suggestions
+        # must outrank sleep improvement tips (65-70) which are also in the Anxiety focus map.
+        # For all other focuses the base priority (45/40/45) keeps mental wellbeing below
+        # clinical/medication/glucose items where it belongs.
+        _anxiety_focus = user.user_focus is not None and 'Anxiety' in user.user_focus
+        _mw_priority_hi = 78 if _anxiety_focus else 45   # meditation / action plan
+        _mw_priority_lo = 72 if _anxiety_focus else 40   # journaling
+
         if not user.meditation_opened_30d:
             eligible.append({
                 'key': 'mental_try_meditation',
                 'category': 'mental_wellbeing',
-                'priority': 45
+                'priority': _mw_priority_hi
             })
         
         if not user.journal_entry_30d:
             eligible.append({
                 'key': 'mental_journaling',
                 'category': 'mental_wellbeing',
-                'priority': 40
+                'priority': _mw_priority_lo
             })
         
         if not user.action_plan_progress_30d:
             eligible.append({
                 'key': 'mental_action_plan',
                 'category': 'mental_wellbeing',
-                'priority': 45
+                'priority': _mw_priority_hi
             })
         
         # === FALLBACK: EXPLORE ===
@@ -1176,6 +1291,14 @@ class LogicEngine:
             if self._is_category_allowed(o['category'], user)
         ]
         
+        # Fallback: if focus filtering eliminated everything, use unfiltered lists
+        # so the user still gets a meaningful message (e.g. a Weight-focused user
+        # with no weight data should still see their CGM summary).
+        if not filtered_actions:
+            filtered_actions = list(all_actions)
+        if not filtered_opportunities:
+            filtered_opportunities = list(all_opportunities)
+        
         # Calculate priorities for actions
         for action in filtered_actions:
             action['priority'] = self._calculate_action_priority(
@@ -1191,16 +1314,27 @@ class LogicEngine:
             key=lambda x: (x.get('priority', 0), random.random()), reverse=True
         )
         
-        # Special case: CGM with good TIR gets glucose + 1 additional action
+        # Special case: CGM users with qualifying glucose data always get glucose
+        # as one positive action.  Per requirements: "If user has CGM and previous
+        # day's TIR met the target OR was better than the day before, include in
+        # summary every day AND include an additional positive action."
         selected_actions = []
         if user.has_cgm:
             thresholds = self.thresholds['glucose'][user.effective_a1c_group.value]
-            if safe_gte(user.tir_pct, thresholds['tir_positive_threshold']):
-                # Find glucose action and add it
+            tir_met_target = safe_gte(user.tir_pct, thresholds['tir_positive_threshold'])
+            tir_improved = (user.tir_prev_day is not None
+                           and user.tir_pct is not None
+                           and user.tir_pct > user.tir_prev_day)
+            if tir_met_target or tir_improved:
+                # Find best glucose action and force-include it.
+                # Searches filtered_actions so the focus filter is respected:
+                # Weight focus now includes glucose in its map, so it will be
+                # present here. Sleep/Anxiety focuses do not, so glucose is
+                # correctly excluded for those patients.
                 glucose_actions = [a for a in filtered_actions if a['category'] == 'glucose']
                 if glucose_actions:
                     selected_actions.append(glucose_actions[0])
-                    # Remove glucose from remaining
+                    # Remove glucose from remaining so the next slot picks a different category
                     filtered_actions = [a for a in filtered_actions if a['category'] != 'glucose']
         
         # Select remaining actions (up to max of 2 total)
@@ -1247,12 +1381,15 @@ class LogicEngine:
                 'data': action.get('data', {})
             })
         
-        # Get opportunity text
-        opp_template = self.opportunity_templates.get(selected_opportunity['key'], {})
-        if isinstance(opp_template, dict):
-            opp_text = opp_template.get('template', '')
+        # Get opportunity text — use text_override if pre-selected (e.g. sleep suggestions)
+        if 'text_override' in selected_opportunity:
+            opp_text = selected_opportunity['text_override']
         else:
-            opp_text = str(opp_template)
+            opp_template = self.opportunity_templates.get(selected_opportunity['key'], {})
+            if isinstance(opp_template, dict):
+                opp_text = opp_template.get('template', '')
+            else:
+                opp_text = str(opp_template)
         
         return SelectedContent(
             daily_rating=rating_name,
@@ -1270,6 +1407,61 @@ class LogicEngine:
         """Get the name of the previous day (e.g., 'Tuesday')."""
         prev_date = current_date - timedelta(days=1)
         return prev_date.strftime('%A')
+    
+    def _pick_sleep_suggestion(self, history: MessageHistory) -> dict:
+        """
+        Pre-select a specific sleep improvement suggestion for variety.
+        
+        Picks from the sleep_improvement_suggestions list, avoiding suggestions
+        that map to categories recently shown (via history). Falls back to random
+        if all have been shown.
+        
+        Returns:
+            Dict with 'key' and 'template' for the selected suggestion.
+        """
+        suggestions = self.opportunity_templates.get('sleep_improvement_suggestions', [])
+        if not suggestions:
+            return {'key': 'sleep_improvement', 'template': 'Try to improve your sleep tonight'}
+        
+        # Filter out suggestions shown in last 6 days (by key)
+        shown_keys = set(history.categories_shown_last_6d)
+        unseen = [s for s in suggestions if s.get('key', '') not in shown_keys]
+        
+        # Pick from unseen if available, otherwise pick from all
+        pool = unseen if unseen else suggestions
+        selected = random.choice(pool)
+        
+        return {
+            'key': selected.get('key', 'sleep_improvement'),
+            'template': selected.get('template', '')
+        }
+    
+    def _pick_food_healthy_suggestion(self, history: MessageHistory) -> dict:
+        """
+        Pre-select a specific healthy eating suggestion for variety.
+        
+        Picks from the food_healthy_suggestions list, avoiding suggestions
+        recently shown (via history). Falls back to random if all have been shown.
+        
+        Returns:
+            Dict with 'key' and 'template' for the selected suggestion.
+        """
+        suggestions = self.opportunity_templates.get('food_healthy_suggestions', [])
+        if not suggestions:
+            return {'key': 'food_healthy', 'template': 'Try to eat a healthy meal today'}
+        
+        # Filter out suggestions shown in last 6 days (by key)
+        shown_keys = set(history.categories_shown_last_6d)
+        unseen = [s for s in suggestions if s.get('key', '') not in shown_keys]
+        
+        # Pick from unseen if available, otherwise pick from all
+        pool = unseen if unseen else suggestions
+        selected = random.choice(pool)
+        
+        return {
+            'key': selected.get('key', 'food_healthy'),
+            'template': selected.get('template', '')
+        }
 
 
 # ============================================================================
@@ -1355,6 +1547,8 @@ def load_user_context_from_gold(
         
         took_all_meds=bool(row.get('took_all_meds', False)),
         med_adherence_7d_avg=row.get('med_adherence_7d_avg'),
+        takes_glycemic_lowering_med=bool(row.get('takes_glycemic_lowering_med', False)),
+        glycemic_med_adherent=bool(row.get('glycemic_med_adherent', False)),
         
         eligible_positive_actions=row.get('eligible_positive_actions', []),
         eligible_opportunities=row.get('eligible_opportunities', [])

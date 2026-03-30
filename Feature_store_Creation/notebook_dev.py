@@ -1590,75 +1590,62 @@ def create_glycemic_med_features():
       - glycemic_med_adherent (bool): True if the patient took at least one
         glycemic-lowering medication on that day (statusid = 1).
     """
-    # TODO: Uncomment the implementation below once medclass / medication tables
-    #       are confirmed available in the target catalog.
 
-    # source_catalog = _source_catalog
+    source_catalog = _source_catalog
 
-    # # 1. Diabetes-class medication IDs
-    # medclass_df = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medclass")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("diabetesclass") == True)
-    #     .select("medclassid")
-    # )
-
-    # glycemic_med_ids = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medication")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .select("medicationid", "medclassid")
-    #     .join(medclass_df, "medclassid", "inner")
-    #     .select("medicationid")
-    #     .distinct()
-    # )
-
-    # # 2. Active prescriptions for glycemic-lowering medications
-    # glycemic_rx = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medprescription")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("statusid") == 1)   # Active only
-    #     .select("patientid", "prescriptionguid", "medicationid")
-    #     .join(glycemic_med_ids, "medicationid", "inner")
-    # )
-
-    # # 3. Patient-level flag: has any active glycemic-lowering prescription
-    # glycemic_patient_df = (
-    #     glycemic_rx
-    #     .select("patientid")
-    #     .distinct()
-    #     .withColumn("takes_glycemic_lowering_med", F.lit(True))
-    # )
-
-    # # 4. Daily flag: took a glycemic-lowering medication on this day
-    # admin_df = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medadministration")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("statusid") == 1)   # Taken
-    #     .select("patientid", "prescriptionguid", "administrationdate",
-    #             "administrationtimezoneoffset")
-    #     .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset")
-    # )
-    # admin_df = add_local_date(admin_df, "administrationdate")
-
-    # glycemic_daily_df = (
-    #     admin_df
-    #     .join(glycemic_rx.select("prescriptionguid").distinct(),
-    #           "prescriptionguid", "inner")
-    #     .groupBy("patientid", "local_date")
-    #     .agg(F.lit(True).alias("glycemic_med_adherent"))
-    # )
-
-    # return glycemic_patient_df, glycemic_daily_df
-
-    # --- Placeholder: returns empty DataFrames with the correct schema ---
-    # takes_glycemic_lowering_med defaults to False for all patients.
-    # glycemic_med_adherent defaults to False for all patient-days.
-    glycemic_patient_df = spark.createDataFrame(
-        [], "patientid STRING, takes_glycemic_lowering_med BOOLEAN"
+    # 1. Diabetes-class medication IDs
+    medclass_df = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medclass")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("diabetesclass") == True)
+        .select("medclassid")
     )
-    glycemic_daily_df = spark.createDataFrame(
-        [], "patientid STRING, local_date DATE, glycemic_med_adherent BOOLEAN"
+
+    glycemic_med_ids = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medication")
+        .filter(F.col("_fivetran_deleted") == False)
+        .select("medicationid", "medclassid")
+        .join(medclass_df, "medclassid", "inner")
+        .select("medicationid")
+        .distinct()
     )
+
+    # 2. Active prescriptions for glycemic-lowering medications
+    glycemic_rx = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medprescription")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("statusid") == 1)   # Active only
+        .select("patientid", "prescriptionguid", "medicationid")
+        .join(glycemic_med_ids, "medicationid", "inner")
+    )
+
+    # 3. Patient-level flag: has any active glycemic-lowering prescription
+    glycemic_patient_df = (
+        glycemic_rx
+        .select("patientid")
+        .distinct()
+        .withColumn("takes_glycemic_lowering_med", F.lit(True))
+    )
+
+    # 4. Daily flag: took a glycemic-lowering medication on this day
+    admin_df = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medadministration")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("statusid") == 1)   # Taken
+        .select("patientid", "prescriptionguid", "administrationdate",
+                "administrationtimezoneoffset")
+        .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset")
+    )
+    admin_df = add_local_date(admin_df, "administrationdate")
+
+    glycemic_daily_df = (
+        admin_df
+        .join(glycemic_rx.select("prescriptionguid").distinct(),
+              "prescriptionguid", "inner")
+        .groupBy("patientid", "local_date")
+        .agg(F.lit(True).alias("glycemic_med_adherent"))
+    )
+
     return glycemic_patient_df, glycemic_daily_df
 
 print("✓ Glycemic medication feature function created")

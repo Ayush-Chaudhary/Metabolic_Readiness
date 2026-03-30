@@ -73,7 +73,7 @@ Total base: **50 points** (10 categories × 5 points). Percentage mapped to rati
 | **Grocery** | `bronz_als_azdev24.trxdb_dsmbasedb_user.grocerydetails` | patientid, entrydatetimeinmills | ✅ Added - daily flag |
 | **Action Plan** | `bronz_als_azdev24.trxdb_dsmbasedb_user.actionplanprogress` | patientid, actionplanstatus (1=final, 2=completed, 3=deleted), createddate, timezoneoffset | ✅ Added - active/completed/7d/30d flags |
 
-### Newly Added (Mar 2026)
+### Newly Added (23 Mar 2026)
 
 | Category | Table | Key Columns | Status |
 |----------|-------|-------------|--------|
@@ -130,19 +130,41 @@ These are features that the business requirements call for but aren't yet comput
 - ✅ Bonus point system (framework in place, some data sources missing)
 - ✅ Positive action detection for all main categories
 - ✅ Opportunity detection for all main categories
-- ✅ Focus area filtering (only show relevant categories)
-- ✅ Priority system with boosts (journey, CGM, weight goal, meds, focus area, variety)
+- ✅ Focus area filtering (only show relevant categories) — **broadened to match YAML spec (23 Mar 2026)**
+- ✅ Focus filter fallback — if filtering removes all qualifying content, unfiltered data is used **(23 Mar 2026)**
+- ✅ Priority system with boosts (journey, CGM, weight goal, focus area, variety)
 - ✅ Frequency capping (weight max 2x/week, no back-to-back)
 - ✅ 3-day streak detection and category switching
 - ✅ 6-day lookback for "not recently shown" priority boost
 - ✅ Message history upsert with MERGE for idempotency
 - ✅ LLM prompt templates in `prompts.yml`
 - ✅ MLflow wrapper for Databricks Model Serving
-- ✅ Time-based greetings
+- ✅ Time-based greetings — **randomized from expanded pool (23 Mar 2026)**
 - ✅ Journey tracking (has_active_journey, journey_task_completed) - from GuidedJourneyWeeksAndTasksDetail table
 - ✅ Exercise video completion tracking - from curatedvideositemdetail table
 - ✅ Exercise program tracking (started/completed/progress) - from curatedvideosprogramdetail table
 - ✅ Grocery bonus flag - from grocerydetails table
+- ✅ CGM force-include expanded — now triggers on TIR meeting target OR improving from previous day **(23 Mar 2026)**
+- ✅ Glucose opportunity decision tree — branching logic for food logging, glycemic med adherence, provider contact, pay attention **(23 Mar 2026)**
+- ✅ Post-generation validation LLM call — toggleable language quality check **(23 Mar 2026)**
+- ✅ Sleep improvement suggestions pre-selected by logic engine (13 specific tips with variety tracking) **(23 Mar 2026)**
+- ✅ Food healthy eating suggestions pre-selected by logic engine (8 specific tips with variety tracking) **(23 Mar 2026)**
+- ✅ Bonus activities surfaced as positive actions — exercise_program_started, ai_meal_plan_generated, article_read, video_watched, lesson_completed **(23 Mar 2026)**
+- ✅ Medication opportunity guard — won't suggest reminders if user took all meds yesterday **(23 Mar 2026)**
+
+### Clinical Coaching Fixes (23 Mar 2026)
+Per clinical feedback review, the following changes were made:
+- **Removed**: Medication priority boost (`medications_on_list` set to 0) — was causing messages to over-index on medication adherence
+- **Removed**: "Prioritize showing positive actions from the Medications category more often than other categories" requirement
+- **Added**: System prompt constraints to prevent hyperbolic language ("big step" only for >15% TIR changes)
+- **Added**: System prompt rules against "You had a great day yesterday," "you took a big step" for Journey tasks, "doing something right" when below target
+- **Added**: Explicit instruction to refer to "guided meditation in the app" not just "sitting quietly"
+- **Added**: Grammar/spelling rules for LLM output plus toggleable validation LLM pass
+- **Fixed**: `FOCUS_CATEGORY_MAP` was narrower than YAML `focus_area_mappings` spec — now matches (e.g., Weight focus includes food, activity, steps, sleep)
+- **Fixed**: `should_include_category()` scoring map also broadened to match
+- **Fixed**: CGM force-include only triggered on TIR meeting threshold, not on TIR improving — now covers both
+- **Fixed**: Focus filter with no qualifying data gave empty results — now falls back to unfiltered
+- **Fixed**: Food healthy suggestions were listed in YAML but never wired as opportunities — now pre-selected by logic engine
 
 ### Partially Implemented
 - ⚠️ Mental well-being scoring (meditation/journal/action plan flags now computed in feature store, but logic engine still uses 30-day flags from old placeholders -- needs wiring to new 7-day flags)
@@ -154,6 +176,22 @@ These are features that the business requirements call for but aren't yet comput
 - ❌ Bonus scoring fields (`bonus_ai_meal_plan`, `bonus_article_read`, `bonus_lesson_completed`, `bonus_video_watched`) -- logic engine reads these from `UserContext` but no source tables feed them yet
 - ❌ `med_reminders_enabled` -- source unknown
 - ❌ `user_focus` -- source table unknown
+- ❌ `takes_glycemic_lowering_med` / `glycemic_med_adherent` -- placeholder fields in UserContext; need medication-type data source to identify glycemic-lowering meds **(added 23 Mar 2026)**
+
+---
+
+## Out of Scope / Pending Data Source
+
+Items that require data not yet available. Logic engine placeholder code is in place — will activate when data is wired.
+
+| Item | Placeholder | What's Needed | Impact |
+|------|-------------|---------------|--------|
+| **Glycemic-lowering med identification** | `UserContext.takes_glycemic_lowering_med = False` | Medication-type column or lookup table to distinguish glycemic-lowering meds from other medications | Glucose opportunity decision tree steps 2 & 3 (take med as prescribed / contact provider) won't activate |
+| **Glycemic med adherence** | `UserContext.glycemic_med_adherent = False` | Same as above — once med type is known, adherence can be calculated | Same as above |
+| **AI meal plan tracking** | `UserContext.bonus_ai_meal_plan = False` | Table/column tracking when user generated an AI meal plan | Won't appear as positive action or bonus point |
+| **Article/lesson/video tracking** | `bonus_article_read`, `bonus_lesson_completed`, `bonus_video_watched = False` | Content interaction table | Won't appear as positive actions or Explore-category content |
+| **User focus preferences** | `UserContext.user_focus = None` | Where focus area preference is stored | All categories included (no filtering) |
+| **Med reminders enabled** | `UserContext.med_reminders_enabled = False` | User settings table | Medication reminders opportunity may fire for users who already have reminders enabled |
 
 ---
 
@@ -166,20 +204,21 @@ These are features that the business requirements call for but aren't yet comput
 
 ### P1 - Find Missing Tables
 4. **Content interaction table** -- needed for article/lesson/video tracking (Explore category + bonus points)
-5. **AI meal plan table** -- needed for bonus point
+5. **AI meal plan table** -- needed for bonus point + positive action
 6. **User focus/preferences table** -- needed for category filtering
+7. **Glycemic-lowering medication type table** -- needed for glucose opportunity decision tree steps 2 & 3
 
 ### P2 - Improve Existing Logic
-7. **Medication adherence** -- implement proper daily expected dose calculation using `frequencytype` and `frequencyvalue` from prescriptions
-8. **Per-patient glucose targets** -- find high/low target columns or a separate table for DIP and non-DM classification
-9. **Additional nutrient goals** -- once goal columns for fiber, sugar, etc. are available, add to nutrient target scoring
-12. **`sodium` column** -- verify if `sodiumobservationstatus` in the food table is a value or a status flag
+8. **Medication adherence** -- implement proper daily expected dose calculation using `frequencytype` and `frequencyvalue` from prescriptions
+9. **Per-patient glucose targets** -- find high/low target columns or a separate table for DIP and non-DM classification
+10. **Additional nutrient goals** -- once goal columns for fiber, sugar, etc. are available, add to nutrient target scoring
+11. **`sodium` column** -- verify if `sodiumobservationstatus` in the food table is a value or a status flag
 
 ### P3 - Production Hardening
-13. Run end-to-end test with the updated feature store on Databricks
-14. Validate scoring output against the `Scoring_Criteria.csv` expected values
-15. Deploy updated MLflow model with new feature version
-16. Set up Databricks Workflow for daily Gold table refresh
+12. Run end-to-end test with the updated feature store on Databricks
+13. Validate scoring output against the `Scoring_Criteria.csv` expected values
+14. Deploy updated MLflow model with new feature version
+15. Set up Databricks Workflow for daily Gold table refresh
 
 ---
 

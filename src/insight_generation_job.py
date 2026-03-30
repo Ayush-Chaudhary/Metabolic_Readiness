@@ -25,6 +25,23 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+# ===== WIDGETS =====
+dbutils.widgets.text("gold_catalog",         "bronz_als_azuat2",                       "Gold Catalog")
+dbutils.widgets.text("gold_schema",          "llm",                                    "Gold Schema")
+dbutils.widgets.text("gold_table_name",      "user_daily_health_habits",               "Gold Table Name")
+dbutils.widgets.text("output_catalog",       "bronz_als_azuat2",                       "Output Catalog")
+dbutils.widgets.text("output_schema",        "llm",                                    "Output Schema")
+dbutils.widgets.text("output_table_name",    "simon_healthy_habits_insights",                 "Output Table Name")
+
+_gold_catalog       = dbutils.widgets.get("gold_catalog")
+_gold_schema        = dbutils.widgets.get("gold_schema")
+_gold_table_name    = dbutils.widgets.get("gold_table_name")
+_output_catalog     = dbutils.widgets.get("output_catalog")
+_output_schema      = dbutils.widgets.get("output_schema")
+_output_table_name  = dbutils.widgets.get("output_table_name")
+
+# COMMAND ----------
+
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import json
@@ -35,9 +52,9 @@ import sys
 JOB_CONFIG: Dict[str, Any] = {
     # Source: Gold feature store (written by Notebook 1)
     "gold_table": {
-        "catalog": "bronz_als_azuat2",
-        "schema": "llm",
-        "table_name": "user_daily_health_habits",
+        "catalog": _gold_catalog,
+        "schema": _gold_schema,
+        "table_name": _gold_table_name,
     },
 
     # Source: Message history (for frequency capping)
@@ -49,9 +66,9 @@ JOB_CONFIG: Dict[str, Any] = {
 
     # Destination: Daily insights output table
     "output_table": {
-        "catalog": "bronz_als_azuat2",
-        "schema": "llm",
-        "table_name": "daily_patient_insights",
+        "catalog": _output_catalog,
+        "schema": _output_schema,
+        "table_name": _output_table_name,
     },
 
     # Prompts / config file (Databricks Workspace path)
@@ -133,8 +150,7 @@ CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
     insight_date DATE      NOT NULL  COMMENT 'Date the insight was generated for (yesterday data)',
     insight      STRING              COMMENT 'Full personalised health message (~250 words)',
     score_name   STRING              COMMENT 'Daily health rating: Committed | Strong | Consistent | Building | Ready',
-    generated_at TIMESTAMP           COMMENT 'Timestamp when this row was written',
-    CONSTRAINT pk_daily_insight PRIMARY KEY (patient_id, insight_date)
+    generated_at TIMESTAMP           COMMENT 'Timestamp when this row was written'
 )
 USING DELTA
 COMMENT 'One row per patient per day. Written by the SIMON Health Habits batch job (Notebook 2).'
@@ -151,19 +167,21 @@ print(f"✓ Output table ready: {OUTPUT_TABLE}")
 
 # COMMAND ----------
 
-# Report date is today (features were computed for yesterday's activity)
-report_date     = datetime.now()
-report_date_str = report_date.strftime("%Y-%m-%d")
+# feature_date  = yesterday  (the date the feature store was computed for)
+# insight_date  = today      (the date the generated insight belongs to)
+feature_date     = datetime.now() - timedelta(days=1)
+feature_date_str = feature_date.strftime("%Y-%m-%d")
+insight_date_str = datetime.now().strftime("%Y-%m-%d")
 
 patients_df = spark.sql(f"""
     SELECT DISTINCT patientid
     FROM   {GOLD_TABLE}
-    WHERE  report_date = '{report_date_str}'
+    WHERE  report_date = '{feature_date_str}'
 """)
 
 patient_ids: List[str] = [row["patientid"] for row in patients_df.collect()]
 total_patients = len(patient_ids)
-print(f"✓ Found {total_patients} patients with feature data for {report_date_str}")
+print(f"✓ Found {total_patients} patients with feature data for {feature_date_str} (generating insights for {insight_date_str})")
 
 # COMMAND ----------
 # MAGIC %md
@@ -180,7 +198,7 @@ for i, patient_id in enumerate(patient_ids, start=1):
         row = spark.sql(f"""
             SELECT * FROM {GOLD_TABLE}
             WHERE  patientid = '{patient_id}'
-            AND    report_date = '{report_date_str}'
+            AND    report_date = '{feature_date_str}'
             LIMIT 1
         """).collect()
 
@@ -211,7 +229,7 @@ for i, patient_id in enumerate(patient_ids, start=1):
 
         result_row = {
             "patient_id"  : patient_id,
-            "insight_date": report_date_str,
+            "insight_date": insight_date_str,
             "insight"     : gen["message"],
             "score_name"  : selected.daily_rating,
             "generated_at": datetime.utcnow().isoformat(),
@@ -225,7 +243,7 @@ for i, patient_id in enumerate(patient_ids, start=1):
         results.append(result_row)
 
         # --- Update message history table (for frequency capping) ---
-        upsert_message_history(spark, patient_id, report_date_str, result_row)
+        upsert_message_history(spark, patient_id, insight_date_str, result_row)
 
         if i % 50 == 0 or i == total_patients:
             pct = round(i / total_patients * 100)
@@ -315,6 +333,6 @@ spark.sql(f"""
         COUNT(CASE WHEN score_name = 'Building'   THEN 1 END) AS building,
         COUNT(CASE WHEN score_name = 'Ready'      THEN 1 END) AS ready
     FROM {OUTPUT_TABLE}
-    WHERE insight_date = '{report_date_str}'
+    WHERE insight_date = '{insight_date_str}'
     GROUP BY insight_date
 """).display()

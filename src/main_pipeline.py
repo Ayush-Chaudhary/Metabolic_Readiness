@@ -189,6 +189,8 @@ def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> Use
         has_nutrient_goals=bool(features.get('has_nutrient_goals', False)),
         took_all_meds=bool(features.get('took_all_meds', False)),
         med_adherence_7d_avg=features.get('med_adherence_7d_avg'),
+        takes_glycemic_lowering_med=bool(features.get('takes_glycemic_lowering_med', False)),
+        glycemic_med_adherent=bool(features.get('glycemic_med_adherent', False)),
         meditation_opened_30d=bool(features.get('meditation_opened_30d', False)),
         journal_entry_30d=bool(features.get('journal_entry_30d', False)),
         action_plan_progress_30d=bool(features.get('action_plan_progress_30d', False)),
@@ -637,6 +639,8 @@ class MLflowWrapper(PythonModel):
             sleep_rating=features.get('sleep_rating'),
             meals_logged_count=features.get('unique_meals_logged'),
             took_all_meds=features.get('took_all_meds', False),
+            takes_glycemic_lowering_med=bool(features.get('takes_glycemic_lowering_med', False)),
+            glycemic_med_adherent=bool(features.get('glycemic_med_adherent', False)),
         )
     
     def predict(self, context, model_input):

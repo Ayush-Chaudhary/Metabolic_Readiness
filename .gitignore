@@ -2,6 +2,7 @@
 .databricks
 databricks.yml
 simon/
+evaluation/
 SIMON_Insights_Query_API.postman_collection.json
 .vscode/
 # Ignore Python cache files

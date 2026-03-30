@@ -39,6 +39,8 @@ class InsightGenerator:
         self.constraints = self.config['message_constraints']
         self.system_prompt_template = self.config['system_prompt']
         self.user_prompt_template = self.config['user_prompt_template']
+        self.validation_config = self.config.get('validation', {})
+        self.validation_enabled = self.validation_config.get('enabled', False)
         
         # Initialize the Databricks client (lazy initialization)
         self._client = None
@@ -197,6 +199,71 @@ class InsightGenerator:
         
         return random.choice(templates)
     
+    def _validate_message(self, message: str) -> dict:
+        """
+        Post-generation validation LLM call for language quality.
+        
+        Checks for spelling errors, run-on sentences, dashes used as periods,
+        informal grammar, and reading level above 7th grade Flesch-Kincaid.
+        
+        Args:
+            message: The generated message to validate
+            
+        Returns:
+            Dict with 'message' (corrected or original) and 'was_corrected' bool
+        """
+        validation_prompt = (
+            "Review the following health coaching message for language quality issues:\n\n"
+            f'"""\n{message}\n"""\n\n'
+            "Check for:\n"
+            "1. Spelling errors\n"
+            "2. Run-on sentences (split into separate sentences)\n"
+            "3. Dashes used instead of periods (replace with periods)\n"
+            "4. Informal or incorrect grammar\n"
+            "5. Reading level above 7th grade (simplify complex words)\n"
+            "6. Sentences longer than 12 words (split them)\n\n"
+            "If the message has NO issues, respond with exactly: PASS\n"
+            "If the message has issues, respond with ONLY the corrected message text. "
+            "Do not add explanations, labels, or commentary."
+        )
+        
+        try:
+            client = self._get_client()
+            
+            if client == "mock":
+                return {'message': message, 'was_corrected': False}
+            
+            from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
+            
+            response = client.serving_endpoints.query(
+                name=self._endpoint,
+                messages=[
+                    ChatMessage(
+                        role=ChatMessageRole.SYSTEM,
+                        content="You are a language quality reviewer. Fix grammar, spelling, and readability issues in health coaching messages. Keep the same meaning and tone."
+                    ),
+                    ChatMessage(
+                        role=ChatMessageRole.USER,
+                        content=validation_prompt
+                    )
+                ],
+                max_tokens=self.validation_config.get('max_tokens', 200),
+                temperature=self.validation_config.get('temperature', 0.3),
+            )
+            
+            result = response.choices[0].message.content.strip()
+            
+            if result.upper() == "PASS":
+                logger.info("Validation passed — no corrections needed")
+                return {'message': message, 'was_corrected': False}
+            else:
+                logger.info("Validation applied corrections to message")
+                return {'message': result, 'was_corrected': True}
+                
+        except Exception as e:
+            logger.warning(f"Validation LLM call failed, using original message: {e}")
+            return {'message': message, 'was_corrected': False}
+    
     def generate_insight(
         self,
         daily_rating: str,
@@ -238,8 +305,15 @@ class InsightGenerator:
         logger.debug(f"User prompt: {user_prompt[:200]}...")
         
         try:
-            # Generate message (no validation or retries)
+            # Generate message
             message = self._call_llm(system_prompt, user_prompt)
+            
+            # Optional post-generation validation for language quality
+            validation_applied = False
+            if self.validation_enabled:
+                validation_result = self._validate_message(message)
+                message = validation_result['message']
+                validation_applied = validation_result['was_corrected']
             
             return {
                 'message': message,
@@ -249,7 +323,8 @@ class InsightGenerator:
                 'character_count': len(message),
                 'success': True,
                 'positive_actions_used': [a['key'] for a in positive_actions],
-                'opportunity_used': opportunity.get('key', 'unknown')
+                'opportunity_used': opportunity.get('key', 'unknown'),
+                'validation_applied': validation_applied
             }
             
         except Exception as e:

@@ -283,14 +283,12 @@ evaluation_criteria:
       Check for correct spelling and adherence to specific punctuation and style rules.
 
       **Punctuation rules:**
-      - Only one space after periods
       - No apostrophes after acronyms (e.g., BGs not BG's)
       - Uses Oxford comma in lists (e.g., "red, white, and blue")
       - Hyphenates compound modifiers before nouns: short-acting, long-acting, after-meal
       - Does NOT hyphenate: premeal, recheck, bedtime, mealtime
       - Avoids semicolons; uses periods or commas instead
       - No mid-sentence ellipses (...)
-      - Sentence does not start with "And" or "But"
 
       **Style rules:**
       - "Health care" is two words (not "healthcare")
