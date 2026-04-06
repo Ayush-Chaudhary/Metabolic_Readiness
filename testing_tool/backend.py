@@ -93,7 +93,7 @@ GLUCOSE_SCENARIOS = {
     },
     "DM (A1C <8): TIR >= 50%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_8",
-        "tir_range": (50, 95), "high_pct_range": (2, 20), "low_pct_range": (0, 4),
+        "tir_range": (50, 95), "high_pct_range": (2, 20), "low_pct_range": (0, 1),
     },
     "DIP User: TIR >= 70%": {
         "has_cgm": True, "a1c_hint": "DIP",
@@ -105,16 +105,16 @@ GLUCOSE_SCENARIOS = {
     },
     "TIR improved from prev day": {
         "has_cgm": True,
-        "tir_range": (50, 80), "high_pct_range": (10, 30), "low_pct_range": (1, 5),
+        "tir_range": (50, 80), "high_pct_range": (10, 30), "low_pct_range": (0, 3),
         "improved": True,
     },
     "DM (A1C <7): TIR <70%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7",
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (0, 3),
     },
     "DM (A1C <7): TIR <70% + No meals": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7", "no_meals": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 4),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (0, 3),
     },
     # Branch 2: take your medication (low_pct capped at 3 so safety guard doesn't suppress)
     "DM (A1C <7): TIR <70% + Glycemic med (not taking)": {
@@ -150,11 +150,11 @@ GLUCOSE_SCENARIOS = {
     },
     "DIP: TIR <70%": {
         "has_cgm": True, "a1c_hint": "DIP",
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 5),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (0, 4),
     },
     "DIP: TIR <70% + No meals": {
         "has_cgm": True, "a1c_hint": "DIP", "no_meals": True,
-        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (1, 5),
+        "tir_range": (30, 69), "high_pct_range": (20, 40), "low_pct_range": (0, 4),
     },
     # Branch 2: take your medication (low_pct capped at 4 — DIP threshold is 5%)
     "DIP: TIR <70% + Glycemic med (not taking)": {
@@ -176,21 +176,23 @@ GLUCOSE_SCENARIOS = {
         "has_cgm": True, "a1c_hint": "NON_DM", "no_meals": True,
         "tir_range": (60, 89), "high_pct_range": (5, 20), "low_pct_range": (0, 1),
     },
+    # High scenarios: low_pct capped below each group's low_time_max_pct
+    # to prevent glucose_contact_provider from firing alongside high-glucose coaching.
     "DM (A1C <7): High >25%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7",
-        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (1, 4),
+        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (0, 3),
     },
     "DM (A1C <8): High >50%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_8",
-        "tir_range": (10, 40), "high_pct_range": (51, 70), "low_pct_range": (1, 4),
+        "tir_range": (10, 40), "high_pct_range": (51, 70), "low_pct_range": (0, 1),
     },
     "DIP: High >25%": {
         "has_cgm": True, "a1c_hint": "DIP",
-        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (1, 4),
+        "tir_range": (30, 60), "high_pct_range": (26, 50), "low_pct_range": (0, 4),
     },
     "Non-DM: Above Target >5%": {
         "has_cgm": True, "a1c_hint": "NON_DM",
-        "tir_range": (60, 89), "high_pct_range": (6, 20), "low_pct_range": (1, 3),
+        "tir_range": (60, 89), "high_pct_range": (6, 20), "low_pct_range": (0, 1),
     },
     "DM (A1C <7): Low/V-Low >4%": {
         "has_cgm": True, "a1c_hint": "DM_TARGET_7",
@@ -672,6 +674,65 @@ def generate_synthetic_context(
 
 
 # =============================================================================
+# WEEKLY CONTEXT BUILDER
+# =============================================================================
+
+def _build_weekly_context(user: UserContext, opportunity: dict) -> str:
+    """
+    Build a weekly-context string for the LLM when 7-day trend data
+    influenced the opportunity selection and differs from yesterday's data.
+    
+    This helps the LLM explain *why* a suggestion is given even when
+    yesterday's data looked good (e.g. "slept 8h last night but your
+    weekly average is only 5.5h").
+    """
+    lines = []
+    opp_key = opportunity.get('key', '')
+    opp_category = opportunity.get('category', '')
+
+    # Sleep: weekly average influenced opportunity but yesterday was good
+    if opp_category == 'sleep' or opp_key.startswith('sleep_'):
+        if (user.sleep_duration_hours is not None
+                and user.avg_sleep_hours_7d is not None
+                and user.sleep_duration_hours >= 7
+                and user.avg_sleep_hours_7d < 7):
+            lines.append(
+                f"- Yesterday's sleep: {user.sleep_duration_hours:.1f}h. "
+                f"7-day average: {user.avg_sleep_hours_7d:.1f}h (below 7h target)."
+            )
+        if (user.sleep_rating is not None
+                and user.avg_sleep_rating_7d is not None
+                and user.sleep_rating >= 7
+                and user.avg_sleep_rating_7d < 7):
+            lines.append(
+                f"- Yesterday's sleep rating: {int(user.sleep_rating)}/10. "
+                f"7-day average rating: {user.avg_sleep_rating_7d:.1f}/10 (below 7 target)."
+            )
+
+    # Activity: weekly total influenced opportunity
+    if opp_category == 'activity' or opp_key.startswith('activity_'):
+        if (user.active_minutes is not None
+                and user.weekly_active_minutes is not None
+                and user.active_minutes >= 20
+                and user.weekly_active_minutes < 150):
+            lines.append(
+                f"- Yesterday's active minutes: {int(user.active_minutes)}. "
+                f"Weekly total: {int(user.weekly_active_minutes)} min (below 150 min goal)."
+            )
+
+    # Medication: 7d average influenced opportunity
+    if opp_key == 'medication_reminders':
+        if (user.med_adherence_7d_avg is not None
+                and user.took_all_meds):
+            lines.append(
+                f"- Yesterday: took all meds. "
+                f"7-day adherence average: {user.med_adherence_7d_avg:.0%} (below 50% threshold)."
+            )
+
+    return "\n".join(lines)
+
+
+# =============================================================================
 # PIPELINE RUNNER
 # =============================================================================
 
@@ -780,6 +841,9 @@ def run_pipeline(
     # Calculate the score details for display
     rating_name, rating_desc = logic_engine.calculate_daily_rating(user_context)
 
+    # Build weekly context string — tells LLM when weekly trends influenced the opportunity
+    weekly_context = _build_weekly_context(user_context, selected_content.opportunity)
+
     # Generate the insight message
     generation_result = insight_gen.generate_insight(
         daily_rating=selected_content.daily_rating,
@@ -787,6 +851,7 @@ def run_pipeline(
         positive_actions=selected_content.positive_actions,
         opportunity=selected_content.opportunity,
         greeting=selected_content.greeting,
+        weekly_context=weekly_context,
     )
 
     # Build the system + user prompts for display (Prompt Inspector)
@@ -797,6 +862,7 @@ def run_pipeline(
         positive_actions=selected_content.positive_actions,
         opportunity=selected_content.opportunity,
         greeting=selected_content.greeting,
+        weekly_context=weekly_context,
     )
 
     return {

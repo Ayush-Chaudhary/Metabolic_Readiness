@@ -2,11 +2,15 @@
 .databricks
 databricks.yml
 simon/
-evaluation/
 SIMON_Insights_Query_API.postman_collection.json
 .vscode/
+evaluation/
+testing_tool/
 # Ignore Python cache files
 __pycache__/
+testing.txt
+Feature_store_Creation/notebook_dev.py
+Feature_store_Creation/Gemini_convo.txt
 # Credentials — never commit
 .env
 testing_tool/.env

@@ -81,6 +81,14 @@ Total base: **50 points** (10 categories × 5 points). Percentage mapped to rati
 | **Exercise Video** | `bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideositemdetail` | patientid, createddate, modifieddate, statusid (enum: 1=active, 2=completed) | ✅ Added - daily/7d completion flags |
 | **Exercise Program** | `bronz_als_azdev24.trxdb_dsmbasedb_user.curatedvideosprogramdetail` | patientid, statusid (enum: 1=active, 2=completed, 3=stopped), activateddatetime, createddatetime, modifieddatetime | ✅ Added - active/started/completed/progress flags |
 
+### Newly Added (3 Apr 2026)
+
+| Category | Table | Key Columns | Status |
+|----------|-------|-------------|--------|
+| **User Focus** | `bronz_als_azdev24.trxdb_dsmbasedb_user.customizemyappdetails` | patientid, myfocusdata (JSON array: MyFocusID, IsMyFocus, FocusOptionID) | ✅ Added - comma-separated active focus names (e.g. "Weight,Glucose,Activity") |
+| **Glycemic-Lowering Meds** | `medclass` (diabetesclass=TRUE) → `medication` → `medprescription` | medclassid, medicationid, prescriptionguid | ✅ Added - takes_glycemic_lowering_med (patient-level) + glycemic_med_adherent (daily) |
+| **Med Reminders** | `bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescriptiondayschedule` | medprescriptionid, medicationreminder | ✅ Added - med_reminders_enabled flag (1 if any non-null/non-zero reminder configured) |
+
 ### Still Missing (Table Unknown or Not Found)
 
 | Category | What's Needed | Used For | Priority |
@@ -88,8 +96,6 @@ Total base: **50 points** (10 categories × 5 points). Percentage mapped to rati
 | **Exercise Video %** | Percentage completion field in curatedvideositemdetail | Positive action: "completed (90%) an exercise video" - currently tracking completion only | LOW |
 | **AI Meal Plan** | Table tracking when user generated an AI meal plan | Positive action + Bonus: 1 pt | MEDIUM |
 | **Article/Lesson/Video** | Content interaction table (articles read, lessons completed, videos watched) | Explore positive actions + Bonus: 1 pt each (article, lesson, video) | MEDIUM |
-| **Med Reminders** | User settings flag for whether medication reminders are enabled | Opportunity: "Set medication reminders" | LOW |
-| **User Focus** | Where the user's focus area preference is stored (Weight, Glucose, Activity, etc.) | Category filtering for scoring and message selection | MEDIUM |
 | **Step Tracker Connected** | Definitive flag for wearable connection (beyond just having step data) | Exclusion logic: don't show steps if no tracker | LOW |
 | **App Login** | Session/login tracking table | Default fallback positive reinforcement | LOW |
 
@@ -108,7 +114,7 @@ These are features that the business requirements call for but aren't yet comput
 ### Weight Goals
 | Gap | Detail |
 |-----|--------|
-| **Weight goal join** | The `weightgoal` table is registered in CONFIG but the join logic in `create_weight_features()` is not implemented. Need to join to compute: `is_within_maintenance_range`, `weight_goal_type`, `weight_change_lbs_14d`, `weight_change_pct_14d`, `has_weight_goal`. |
+| **Weight 14-day change columns** | The `weightgoal` join is implemented and computes `has_weight_goal`, `weight_goal_type`, `is_within_maintenance_range`, `distance_from_goal`. However `weight_change_lbs_14d` and `weight_change_pct_14d` (used by scoring rules for lose/maintain goals) are not yet computed — only day-over-day delta exists. Need a 14-day rolling weight window. |
 
 ### Food & Nutrition
 | Gap | Detail |
@@ -119,7 +125,7 @@ These are features that the business requirements call for but aren't yet comput
 ### Medication
 | Gap | Detail |
 |-----|--------|
-| **Daily expected dose calculation** | Current implementation uses a simplified count of active prescriptions. Need to properly calculate expected daily doses from `frequencytype` × `frequencyvalue` to get accurate adherence percentage. |
+| **Daily expected dose calculation** | ✅ Now implemented — uses per-prescription `frequencyvalue` for expected doses per day with per-medication capping to prevent over-taking one med from masking misses on another. |
 
 ---
 
@@ -167,16 +173,11 @@ Per clinical feedback review, the following changes were made:
 - **Fixed**: Food healthy suggestions were listed in YAML but never wired as opportunities — now pre-selected by logic engine
 
 ### Partially Implemented
-- ⚠️ Mental well-being scoring (meditation/journal/action plan flags now computed in feature store, but logic engine still uses 30-day flags from old placeholders -- needs wiring to new 7-day flags)
-- ⚠️ A1C target group now available from feature store but `main_pipeline.py` still hardcodes `a1c_target_group: 'dm_target_7'` in `get_user_profile()` -- needs to read from Gold table
-- ⚠️ Weight goal features (table exists but join not implemented in feature store)
-- ⚠️ Exercise video completion % - table tracks completion (statusid=2) but not % progress toward completion
+- ⚠️ Exercise video completion % - table tracks completion (statusid=2) but no `percentcomplete` column exists — `exercise_video_completion_pct` in UserContext is always None
+- ⚠️ Weight 14-day change — `weight_change_lbs_14d` and `weight_change_pct_14d` are read by `main_pipeline.py` but never computed in feature store (only day-over-day delta exists)
 
-### Not Yet Wired
-- ❌ Bonus scoring fields (`bonus_ai_meal_plan`, `bonus_article_read`, `bonus_lesson_completed`, `bonus_video_watched`) -- logic engine reads these from `UserContext` but no source tables feed them yet
-- ❌ `med_reminders_enabled` -- source unknown
-- ❌ `user_focus` -- source table unknown
-- ❌ `takes_glycemic_lowering_med` / `glycemic_med_adherent` -- placeholder fields in UserContext; need medication-type data source to identify glycemic-lowering meds **(added 23 Mar 2026)**
+### Not Yet Wired (Source Table Unknown)
+- ❌ Bonus scoring fields (`bonus_ai_meal_plan`, `bonus_article_read`, `bonus_lesson_completed`, `bonus_video_watched`) -- logic engine has placeholder code but no source tables have been found
 
 ---
 
@@ -186,39 +187,32 @@ Items that require data not yet available. Logic engine placeholder code is in p
 
 | Item | Placeholder | What's Needed | Impact |
 |------|-------------|---------------|--------|
-| **Glycemic-lowering med identification** | `UserContext.takes_glycemic_lowering_med = False` | Medication-type column or lookup table to distinguish glycemic-lowering meds from other medications | Glucose opportunity decision tree steps 2 & 3 (take med as prescribed / contact provider) won't activate |
-| **Glycemic med adherence** | `UserContext.glycemic_med_adherent = False` | Same as above — once med type is known, adherence can be calculated | Same as above |
 | **AI meal plan tracking** | `UserContext.bonus_ai_meal_plan = False` | Table/column tracking when user generated an AI meal plan | Won't appear as positive action or bonus point |
 | **Article/lesson/video tracking** | `bonus_article_read`, `bonus_lesson_completed`, `bonus_video_watched = False` | Content interaction table | Won't appear as positive actions or Explore-category content |
-| **User focus preferences** | `UserContext.user_focus = None` | Where focus area preference is stored | All categories included (no filtering) |
-| **Med reminders enabled** | `UserContext.med_reminders_enabled = False` | User settings table | Medication reminders opportunity may fire for users who already have reminders enabled |
 
 ---
 
 ## What to Do Next (Prioritized)
 
-### P0 - Wire New Features End-to-End
-1. **Update `main_pipeline.py`** `get_user_profile()` to read `a1c_target_group` from the Gold table instead of hardcoding `dm_target_7`
-2. **Implement weight goal join** in `create_weight_features()` to properly compute `has_weight_goal`, `weight_goal_type`, `is_within_maintenance_range`, `weight_change_lbs_14d`, `weight_change_pct_14d`
-3. **Wire mental well-being 7-day flags** in logic engine to use the new `journal_entry_7d`, `meditation_opened_7d`, `action_plan_active` fields
+### P0 - Complete Remaining Feature Gaps
+1. **Add weight 14-day rolling window** in `create_weight_features()` — compute `weight_change_lbs_14d` and `weight_change_pct_14d` using a 14-row window; these are needed by the scoring rules for lose/maintain weight goals
+2. **Reduce feature store lookback** from 90 days to 35 days in `CONFIG["processing"]["lookback_window_days"]` — longest rolling window is 30 days; 90 days is unnecessary overhead
 
 ### P1 - Find Missing Tables
-4. **Content interaction table** -- needed for article/lesson/video tracking (Explore category + bonus points)
-5. **AI meal plan table** -- needed for bonus point + positive action
-6. **User focus/preferences table** -- needed for category filtering
-7. **Glycemic-lowering medication type table** -- needed for glucose opportunity decision tree steps 2 & 3
+3. **Content interaction table** -- needed for article/lesson/video tracking (Explore category + bonus points: article, lesson, video each +1 pt)
+4. **AI meal plan table** -- needed for bonus point (+1 pt) + positive action
 
-### P2 - Improve Existing Logic
-8. **Medication adherence** -- implement proper daily expected dose calculation using `frequencytype` and `frequencyvalue` from prescriptions
-9. **Per-patient glucose targets** -- find high/low target columns or a separate table for DIP and non-DM classification
-10. **Additional nutrient goals** -- once goal columns for fiber, sugar, etc. are available, add to nutrient target scoring
-11. **`sodium` column** -- verify if `sodiumobservationstatus` in the food table is a value or a status flag
+### P2 - Data Verification
+5. **Per-patient glucose targets** -- find high/low target columns or a separate table for DIP and non-DM classification
+6. **`sodium` column** -- verify if `sodiumobservationstatus` in `foodmoduleitem` is a value or a status flag
+7. **Additional nutrient goals** -- check if `patientgoaldetails` has columns for fiber, sugar, sodium beyond the current 4 (protein, fat, calories, carbs)
+8. **Exercise video % completion** -- check `curatedvideositemdetail` for a `percentcomplete` or `watchedpercent` column
 
 ### P3 - Production Hardening
-12. Run end-to-end test with the updated feature store on Databricks
-13. Validate scoring output against the `Scoring_Criteria.csv` expected values
-14. Deploy updated MLflow model with new feature version
-15. Set up Databricks Workflow for daily Gold table refresh
+9. Run end-to-end test with the updated feature store on Databricks
+10. Validate scoring output against the `Scoring_Criteria.csv` expected values
+11. Deploy updated MLflow model with new feature version
+12. Set up Databricks Workflow for daily Gold table refresh
 
 ---
 

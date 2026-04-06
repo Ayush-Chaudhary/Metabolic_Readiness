@@ -2,6 +2,8 @@
 
 Please search the Unity Catalog for tables or columns that provide the following data. For each item, I've described what the data represents and example column names to look for.
 
+> **Last updated: 3 Apr 2026.** Items 3, 4, and 5 have been found and are fully implemented in the notebook. They are kept below for reference only.
+
 ---
 
 ## 1. AI Meal Plan Generation Tracking
@@ -22,30 +24,27 @@ Please search the Unity Catalog for tables or columns that provide the following
 
 ---
 
-## 3. User Focus / Health Goal Preference
-**What we need:** Where the patient's selected focus area is stored — e.g., whether they have chosen to focus on Weight, Glucose, Activity, etc. as their primary health goal.
-**Look for:** Tables or columns like `userfocus`, `focusarea`, `healthgoal`, `primarygoal`, `userpreference`, `patientpreference`, `patientprofile`
-**Key columns:** `patientid`, a focus/goal type column (values like: Weight, Glucose, Activity, Steps, Nutrition, Sleep, Medications, Mental)
-**Catalogs to check:** `bronz_als_azdev24`, `bronz_als_azuat2`
-**Schemas to check:** `trxdb_dsmbasedb_user`, `trxdb_dsmbasedb_userengagement`
+## 3. ~~User Focus / Health Goal Preference~~ ✅ FOUND
+**Table:** `bronz_als_azdev24.trxdb_dsmbasedb_user.customizemyappdetails`
+**Column:** `myfocusdata` — JSON array of structs: `{MyFocusID, IsMyFocus, FocusOptionID}`. `IsMyFocus=1` means active.
+**Focus ID mapping:** 1=Medications, 2=Glucose, 3=Eating Habits, 6=Activity, 7=Sleep, 8=Weight, 13=Anxiety
+**Implementation:** `create_focus_features()` in notebook_dev.py parses this JSON and produces a comma-separated `user_focus` string per patient.
 
 ---
 
-## 4. Glycemic-Lowering Medication Identification
-**What we need:** A way to identify which medications in a patient's prescription list are glycemic-lowering (e.g., metformin, GLP-1 agonists, insulin, SGLT2 inhibitors, sulfonylureas). This could be a medication type/category column on the existing prescription table, or a separate drug lookup table.
-**Existing prescription table:** `bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescription`
-**Look for:** A `medicationtype`, `drugcategory`, `therapeuticclass`, or `ndc` column on `medprescription`, OR a separate drug/formulary lookup table
-**Tables to check:** `medprescription`, `medication`, `drug`, `formulary`, `rxnorm`, `medcategory`
-**Schemas to check:** `trxdb_dsmbasedb_observation`, `trxdb_dsmbasedb_user`
+## 4. ~~Glycemic-Lowering Medication Identification~~ ✅ FOUND
+**Join path:** `medclass` (filter `diabetesclass = TRUE`) → `medication` (join on `medclassid`) → `medprescription` (join on `medicationid`)
+**Key column:** `medclass.diabetesclass` (boolean) — covers metformin, GLP-1 agonists, insulin, SGLT2 inhibitors, sulfonylureas
+**Implementation:** `create_glycemic_med_features()` in notebook_dev.py produces:
+- `takes_glycemic_lowering_med` (patient-level boolean)
+- `glycemic_med_adherent` (daily boolean: took at least one glycemic med that day)
 
 ---
 
-## 5. Medication Reminders Setting
-**What we need:** A flag or setting that indicates whether a patient has medication reminders enabled in the app.
-**Look for:** Tables like `userreminder`, `notificationsetting`, `usernotification`, `reminderpreference`, `usersetting`, `apppreference`
-**Key columns:** `patientid`, a reminder enabled/disabled flag (boolean or statusid), possibly a `remindertype` column
-**Catalogs to check:** `bronz_als_azdev24`, `bronz_als_azuat2`
-**Schemas to check:** `trxdb_dsmbasedb_user`, `trxdb_dsmbasedb_userengagement`
+## 5. ~~Medication Reminders Setting~~ ✅ FOUND
+**Table:** `bronz_als_azdev24.trxdb_dsmbasedb_observation.medprescriptiondayschedule`
+**Column:** `medicationreminder` — non-null and non-zero value means reminders are enabled for that prescription schedule
+**Implementation:** `create_medication_features()` joins prescriptions → schedule, produces `med_reminders_enabled = 1` if any prescription has a configured reminder.
 
 ---
 
@@ -89,15 +88,15 @@ Please search the Unity Catalog for tables or columns that provide the following
 
 ## Summary Table
 
-| # | Data Needed | Priority | Likely Schema |
-|---|-------------|----------|---------------|
-| 1 | AI meal plan generation tracking | MEDIUM | trxdb_dsmbasedb_user |
-| 2 | Article / lesson / video content interactions | MEDIUM | trxdb_dsmbasedb_userengagement |
-| 3 | User's selected focus area / health goal preference | MEDIUM | trxdb_dsmbasedb_user |
-| 4 | Glycemic-lowering medication type / category | HIGH | trxdb_dsmbasedb_observation |
-| 5 | Medication reminders enabled flag | LOW | trxdb_dsmbasedb_user |
-| 6 | Per-patient glucose target range (low/high) | MEDIUM | trxdb_dsmbasedb_observation |
-| 7 | Patient diabetes classification (DM / DIP / non-DM) | MEDIUM | trxdb_dsmbasedb_observation |
-| 8 | Exercise video % completion progress | LOW | trxdb_dsmbasedb_user |
-| 9 | Sodium value column in food log (verify sodiumobservationstatus) | LOW | trxdb_dsmbasedb_observation |
-| 10 | Nutrient goal columns for fiber, sugar, sodium, etc. | LOW | trxdb_dsmbasedb_user |
+| # | Data Needed | Priority | Status |
+|---|-------------|----------|--------|
+| 1 | AI meal plan generation tracking | MEDIUM | ❌ Not found |
+| 2 | Article / lesson / video content interactions | MEDIUM | ❌ Not found |
+| 3 | User's selected focus area / health goal preference | ~~MEDIUM~~ | ✅ Found: `customizemyappdetails.myfocusdata` |
+| 4 | Glycemic-lowering medication type / category | ~~HIGH~~ | ✅ Found: `medclass.diabetesclass=TRUE` |
+| 5 | Medication reminders enabled flag | ~~LOW~~ | ✅ Found: `medprescriptiondayschedule.medicationreminder` |
+| 6 | Per-patient glucose target range (low/high) | MEDIUM | ❌ Not found |
+| 7 | Patient diabetes classification (DM / DIP / non-DM) | MEDIUM | ❌ Not found |
+| 8 | Exercise video % completion progress | LOW | ❌ Not found |
+| 9 | Sodium value column in food log (verify sodiumobservationstatus) | LOW | ❌ Not verified |
+| 10 | Nutrient goal columns for fiber, sugar, sodium, etc. | LOW | ❌ Not found |

@@ -354,6 +354,10 @@ system_prompt: |
   - Make suggestions feel like friendly tips, not commands
   - Use "you" language to make it personal
   
+  NUMERIC ACCURACY RULES:
+  - Always use the exact number provided. Never replace a number with words like "most of the day" or "a lot".
+  - When TIR improved, you MUST include BOTH the starting and ending percentages exactly as given (e.g., "went up from 43% to 47%"). Never replace both values with only a calculated delta like "4 more percentage points" — the specific from/to numbers must appear.
+
   CLINICAL LANGUAGE RULES:
   - Never say "You had a great day yesterday." We only know the data the user logged or synced.
   - Never say "you took a big step" for completing a Journey task. Use "nice work" or "well done" instead.
@@ -363,6 +367,17 @@ system_prompt: |
   - Never use the word "healthcare" as one word. Always write it as two separate words: "health care".
   - Use exactly one space after a period. Never use double spaces.
   - Do not start any sentence with the word "Now". Restructure the thought into the previous sentence or choose a different opener.
+
+  WEEKLY CONTEXT RULES:
+  - When the suggestion is influenced by weekly trend data that differs from yesterday's performance, briefly acknowledge the contrast. For example: "Last night you slept 8 hours. Your week has been tougher on sleep though." This helps the user understand why the suggestion may seem to contradict yesterday's result.
+  - Do NOT ignore the weekly context if it is provided. Use it to make the suggestion feel data-driven, not random.
+
+  TONE SAFETY RULES:
+  - Never assume or state that the user did NOT do something (e.g. "you were not active").
+  - Never use presumptive language about emotions or stress (e.g. "to help with stress," "if you're feeling anxious").
+  - Frame all suggestions as invitations, not corrections (e.g. "You might enjoy..." not "You need to...").
+  - Make the suggestion feel connected to the user's data. Do not give a random tip. Briefly explain why it matters for them.
+  - Do NOT praise a TIR improvement of less than 5 percentage points as a "big" or "great" improvement. Say "a bit more time in range" or "some progress."
 
 # -----------------------------------------------------------------------------
 # PROMPT SEGMENTS - Instructional guidance for LLM (not exact wording)
@@ -691,7 +706,9 @@ user_prompt_template: |
   End with this suggestion (rephrase in your own words):
   {opportunity_suggestion}
   
-  IMPORTANT: Do NOT copy the instructions above word-for-word. Use them as guidance and write the message in your own natural, conversational voice. Do NOT add ratings or generic motivation. Go directly from acknowledgment to suggestion.
+  {weekly_context}
+  
+  IMPORTANT: Do NOT copy the instructions above word-for-word. Use them as guidance and write the message in your own natural, conversational voice. Do NOT add ratings or generic motivation. Go directly from acknowledgment to suggestion. If weekly context is provided, use it to briefly explain why the suggestion matters even if yesterday looked good.
 
 # -----------------------------------------------------------------------------
 # FOCUS AREA MAPPINGS - Which categories apply to each focus
@@ -704,10 +721,10 @@ focus_area_mappings:
     include: ["glucose", "food", "activity", "medications"]
     
   activity:
-    include: ["activity", "steps", "sleep"]
+    include: ["activity", "steps"]
     
   food:
-    include: ["food", "weight"]
+    include: ["food"]
     
   sleep:
     include: ["sleep", "activity"]
@@ -728,7 +745,7 @@ priority_rules:
   weight_goal_active: 80
   medications_on_list: 0  # Disabled per clinical feedback: was causing over-indexing on medication adherence
   user_focus_area: 60
-  not_shown_6_days: 50
+  not_shown_6_days: 200  # High enough to guarantee display when a category hasn't been shown in 6 days
   variety: 40
   
   # Streak override: If excelling in category for 3 days, drop priority

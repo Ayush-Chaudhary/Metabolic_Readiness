@@ -27,16 +27,28 @@ dbutils.widgets.text("source_catalog",   "bronz_als_prod",          "Source Cata
 dbutils.widgets.text("gold_catalog",     "bronz_als_azuat2",           "Gold Catalog")
 dbutils.widgets.text("gold_schema",      "llm",                        "Gold Schema")
 dbutils.widgets.text("gold_table_name",  "user_daily_health_habits",   "Gold Table Name")
+dbutils.widgets.text("insight_date",     "",                            "Insight Date (YYYY-MM-DD, blank=today)")
 
 _source_catalog  = dbutils.widgets.get("source_catalog")
 _gold_catalog    = dbutils.widgets.get("gold_catalog")
 _gold_schema     = dbutils.widgets.get("gold_schema")
 _gold_table_name = dbutils.widgets.get("gold_table_name")
+_insight_date_raw = dbutils.widgets.get("insight_date").strip()
+
+# Resolve insight_date: defaults to today when blank; the feature store
+# will use (insight_date - 1 day) as the reference "yesterday" for features.
+from datetime import datetime as _dt, timedelta as _td
+if _insight_date_raw:
+    _insight_date = _dt.strptime(_insight_date_raw, "%Y-%m-%d").date()
+else:
+    _insight_date = _dt.now().date()
+_feature_date = _insight_date - _td(days=1)
 
 print(f"source_catalog  : {_source_catalog}")
 print(f"gold_catalog    : {_gold_catalog}")
 print(f"gold_schema     : {_gold_schema}")
 print(f"gold_table_name : {_gold_table_name}")
+print(f"insight_date    : {_insight_date}  (feature / yesterday: {_feature_date})")
 
 # COMMAND ----------
 
@@ -146,7 +158,7 @@ CONFIG: Dict[str, Any] = {
     # Processing Configuration
     "processing": {
         "incremental": True,  # Set to False for full refresh
-        "lookback_window_days": 90,  # How far back to process
+        "lookback_window_days": 35,  # 30-day max rolling window + 5-day buffer
         "partition_by": "report_date",
     }
 }
@@ -388,7 +400,7 @@ def create_activity_features() -> DataFrame:
     activity_df = add_local_date(activity_df, "observationdatetime")
     
     # Exclude meditation from activity metrics
-    physical_activity_df = activity_df#.filter(F.col("exercisetype") != meditation_type)
+    physical_activity_df = activity_df.filter(F.col("exercisetype") != meditation_type)
     
     # Calculate daily aggregations
     activity_daily = physical_activity_df.groupBy("patientid", "local_date").agg(
@@ -479,11 +491,16 @@ def create_steps_features() -> DataFrame:
                     "numberofsteps",
                     "startdatetime",
                     "enddatetime",
-                    "timezoneoffset"
+                    "timezoneoffset",
+                    "observationstatus"
                 ))
     
     # Apply timezone (use startdatetime for date bucketing)
     steps_df = add_local_date(steps_df, "startdatetime")
+    
+    # Filter to active/completed records and non-null step counts
+    steps_df = filter_active_records(steps_df, "observationstatus")
+    steps_df = steps_df.filter(F.col("numberofsteps").isNotNull())
     
     # Calculate daily totals
     steps_daily = steps_df.groupBy("patientid", "local_date").agg(
@@ -825,11 +842,75 @@ print("✓ Food with goals feature function created")
 
 # COMMAND ----------
 
+def _merge_sleep_intervals(pdf):
+    """
+    Merge overlapping or contained sleep intervals to prevent double-counting duration.
+    Called per (patientid, local_date) group via applyInPandas.
+
+    Algorithm (O(n log n)):
+      1. Sort by StartDateTime.
+      2. Walk the sorted list once. If the next session starts before the current
+         one ends, extend the current interval; otherwise close it and open a new one.
+
+    Returns a DataFrame with columns:
+      patientid, local_date, sleep_duration_hours, sleep_rating, sleep_entry_count
+    """
+    import pandas as pd
+
+    patientid  = pdf['patientid'].iloc[0]
+    local_date = pdf['local_date'].iloc[0]
+
+    # Ratings are per-session and not affected by overlap — average across original rows
+    avg_rating = pdf['sleeprating'].mean()
+    entry_count = len(pdf)
+
+    if pdf.empty:
+        return pd.DataFrame([{
+            'patientid': str(patientid),
+            'local_date': local_date,
+            'sleep_duration_hours': 0.0,
+            'sleep_rating': avg_rating,
+            'sleep_entry_count': 0,
+        }])
+
+    sorted_df = pdf.sort_values('startdatetime').reset_index(drop=True)
+    current_start = sorted_df.loc[0, 'startdatetime']
+    current_end   = sorted_df.loc[0, 'enddatetime']
+    total_seconds = 0.0
+
+    for i in range(1, len(sorted_df)):
+        row_start = sorted_df.loc[i, 'startdatetime']
+        row_end   = sorted_df.loc[i, 'enddatetime']
+        if row_start <= current_end:
+            # Overlapping or contained — extend current window
+            current_end = max(current_end, row_end)
+        else:
+            # Non-overlapping gap — commit current window
+            total_seconds += (current_end - current_start).total_seconds()
+            current_start = row_start
+            current_end   = row_end
+
+    # Commit final window
+    total_seconds += (current_end - current_start).total_seconds()
+
+    return pd.DataFrame([{
+        'patientid'           : str(patientid),
+        'local_date'          : local_date,
+        'sleep_duration_hours': total_seconds / 3600.0,
+        'sleep_rating'        : avg_rating,
+        'sleep_entry_count'   : int(entry_count),
+    }])
+
+
 def create_sleep_features() -> DataFrame:
     """
     Calculates sleep duration, ratings, and rolling averages.
+    Overlapping sleep intervals are merged before summing so duration is not
+    double-counted when the source table contains multiple overlapping sessions.
     """
-    
+    import pandas as pd
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, DateType
+
     # Read sleep data
     sleep_df = (spark.read.table(get_table_path("sleep"))
                 .select(
@@ -840,23 +921,40 @@ def create_sleep_features() -> DataFrame:
                     "observationstatus",
                     "sleeprating"
                 ))
-    
-    # Apply timezone and filter
-    # Use enddatetime: sleep counts for the day it ended (when the patient woke up)
-    sleep_df = add_local_date(sleep_df, "enddatetime")
-    sleep_df = filter_active_records(sleep_df, "observationstatus")
-    
-    # Calculate sleep duration in hours
-    sleep_df = sleep_df.withColumn(
-        "sleep_duration_hours",
-        (F.unix_timestamp("enddatetime") - F.unix_timestamp("startdatetime")) / 3600
+
+    # Apply timezone offset to get local timestamps, then derive local_date from enddatetime
+    # (sleep counts for the day it ended — when the patient woke up)
+    sleep_df = (
+        sleep_df
+        .withColumn(
+            "startdatetime",
+            F.to_timestamp(F.from_unixtime(
+                F.unix_timestamp(F.col("startdatetime")) + (F.col("timezoneoffset") * 60)
+            ))
+        )
+        .withColumn(
+            "enddatetime",
+            F.to_timestamp(F.from_unixtime(
+                F.unix_timestamp(F.col("enddatetime")) + (F.col("timezoneoffset") * 60)
+            ))
+        )
+        .withColumn("local_date", F.to_date(F.col("enddatetime")))
     )
-    
-    # Group by patient and date (in case multiple sleep sessions per day)
-    sleep_daily = sleep_df.groupBy("patientid", "local_date").agg(
-        F.sum("sleep_duration_hours").alias("sleep_duration_hours"),
-        F.avg("sleeprating").alias("sleep_rating"),
-        F.count("*").alias("sleep_entry_count")
+
+    sleep_df = filter_active_records(sleep_df, "observationstatus")
+
+    # Schema returned by _merge_sleep_intervals
+    merge_schema = StructType([
+        StructField("patientid",            StringType(), True),
+        StructField("local_date",           DateType(),   True),
+        StructField("sleep_duration_hours", DoubleType(), True),
+        StructField("sleep_rating",         DoubleType(), True),
+        StructField("sleep_entry_count",    LongType(),   True),
+    ])
+
+    # Merge overlapping intervals per (patientid, local_date) group
+    sleep_daily = sleep_df.groupBy("patientid", "local_date").applyInPandas(
+        _merge_sleep_intervals, schema=merge_schema
     )
     
     # Add day-over-day deltas
@@ -1590,75 +1688,62 @@ def create_glycemic_med_features():
       - glycemic_med_adherent (bool): True if the patient took at least one
         glycemic-lowering medication on that day (statusid = 1).
     """
-    # TODO: Uncomment the implementation below once medclass / medication tables
-    #       are confirmed available in the target catalog.
 
-    # source_catalog = _source_catalog
+    source_catalog = _source_catalog
 
-    # # 1. Diabetes-class medication IDs
-    # medclass_df = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medclass")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("diabetesclass") == True)
-    #     .select("medclassid")
-    # )
-
-    # glycemic_med_ids = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medication")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .select("medicationid", "medclassid")
-    #     .join(medclass_df, "medclassid", "inner")
-    #     .select("medicationid")
-    #     .distinct()
-    # )
-
-    # # 2. Active prescriptions for glycemic-lowering medications
-    # glycemic_rx = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medprescription")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("statusid") == 1)   # Active only
-    #     .select("patientid", "prescriptionguid", "medicationid")
-    #     .join(glycemic_med_ids, "medicationid", "inner")
-    # )
-
-    # # 3. Patient-level flag: has any active glycemic-lowering prescription
-    # glycemic_patient_df = (
-    #     glycemic_rx
-    #     .select("patientid")
-    #     .distinct()
-    #     .withColumn("takes_glycemic_lowering_med", F.lit(True))
-    # )
-
-    # # 4. Daily flag: took a glycemic-lowering medication on this day
-    # admin_df = (
-    #     spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medadministration")
-    #     .filter(F.col("_fivetran_deleted") == False)
-    #     .filter(F.col("statusid") == 1)   # Taken
-    #     .select("patientid", "prescriptionguid", "administrationdate",
-    #             "administrationtimezoneoffset")
-    #     .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset")
-    # )
-    # admin_df = add_local_date(admin_df, "administrationdate")
-
-    # glycemic_daily_df = (
-    #     admin_df
-    #     .join(glycemic_rx.select("prescriptionguid").distinct(),
-    #           "prescriptionguid", "inner")
-    #     .groupBy("patientid", "local_date")
-    #     .agg(F.lit(True).alias("glycemic_med_adherent"))
-    # )
-
-    # return glycemic_patient_df, glycemic_daily_df
-
-    # --- Placeholder: returns empty DataFrames with the correct schema ---
-    # takes_glycemic_lowering_med defaults to False for all patients.
-    # glycemic_med_adherent defaults to False for all patient-days.
-    glycemic_patient_df = spark.createDataFrame(
-        [], "patientid STRING, takes_glycemic_lowering_med BOOLEAN"
+    # 1. Diabetes-class medication IDs
+    medclass_df = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medclass")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("diabetesclass") == True)
+        .select("medclassid")
     )
-    glycemic_daily_df = spark.createDataFrame(
-        [], "patientid STRING, local_date DATE, glycemic_med_adherent BOOLEAN"
+
+    glycemic_med_ids = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medication")
+        .filter(F.col("_fivetran_deleted") == False)
+        .select("medicationid", "medclassid")
+        .join(medclass_df, "medclassid", "inner")
+        .select("medicationid")
+        .distinct()
     )
+
+    # 2. Active prescriptions for glycemic-lowering medications
+    glycemic_rx = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medprescription")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("statusid") == 1)   # Active only
+        .select("patientid", "prescriptionguid", "medicationid")
+        .join(glycemic_med_ids, "medicationid", "inner")
+    )
+
+    # 3. Patient-level flag: has any active glycemic-lowering prescription
+    glycemic_patient_df = (
+        glycemic_rx
+        .select("patientid")
+        .distinct()
+        .withColumn("takes_glycemic_lowering_med", F.lit(True))
+    )
+
+    # 4. Daily flag: took a glycemic-lowering medication on this day
+    admin_df = (
+        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medadministration")
+        .filter(F.col("_fivetran_deleted") == False)
+        .filter(F.col("statusid") == 1)   # Taken
+        .select("patientid", "prescriptionguid", "administrationdate",
+                "administrationtimezoneoffset")
+        .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset")
+    )
+    admin_df = add_local_date(admin_df, "administrationdate")
+
+    glycemic_daily_df = (
+        admin_df
+        .join(glycemic_rx.select("prescriptionguid").distinct(),
+              "prescriptionguid", "inner")
+        .groupBy("patientid", "local_date")
+        .agg(F.lit(True).alias("glycemic_med_adherent"))
+    )
+
     return glycemic_patient_df, glycemic_daily_df
 
 print("✓ Glycemic medication feature function created")
@@ -2343,160 +2428,3 @@ def execute_feature_store_creation():
 
 # Execute the feature store creation
 gold_feature_table = execute_feature_store_creation()
-
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## 15. Data Quality Checks
-
-# COMMAND ----------
-
-def run_data_quality_checks(df: DataFrame):
-    """
-    Performs data quality checks on the generated feature table.
-    """
-    
-    print("="*80)
-    print("🔍 RUNNING DATA QUALITY CHECKS")
-    print("="*80)
-    
-    # Check 1: No duplicate patient-date combinations
-    duplicate_count = (df.groupBy("patientid", "report_date")
-                       .count()
-                       .filter(F.col("count") > 1)
-                       .count())
-    
-    if duplicate_count == 0:
-        print("✓ No duplicate (patientid, report_date) keys found")
-    else:
-        print(f"⚠ WARNING: Found {duplicate_count} duplicate keys!")
-    
-    # Check 2: TIR values within valid range
-    invalid_tir = df.filter(
-        F.col("tir_pct").isNotNull() & 
-        ((F.col("tir_pct") < 0) | (F.col("tir_pct") > 100))
-    ).count()
-    
-    if invalid_tir == 0:
-        print("✓ All TIR values within valid range (0-100%)")
-    else:
-        print(f"⚠ WARNING: Found {invalid_tir} rows with invalid TIR values!")
-    
-    # Check 3: Date range coverage
-    date_stats = df.select(
-        F.min("report_date").alias("earliest_date"),
-        F.max("report_date").alias("latest_date"),
-        F.countDistinct("report_date").alias("unique_dates"),
-        F.countDistinct("patientid").alias("unique_patients")
-    ).collect()[0]
-    
-    print(f"\n📅 Date Coverage:")
-    print(f"   Earliest: {date_stats['earliest_date']}")
-    print(f"   Latest: {date_stats['latest_date']}")
-    print(f"   Unique dates: {date_stats['unique_dates']}")
-    print(f"   Unique patients: {date_stats['unique_patients']}")
-    
-    # Check 4: Null rates for key features
-    print(f"\n📊 Feature Completeness:")
-    key_features = [
-        "tir_pct", "daily_step_count", "active_minutes",
-        "sleep_duration_hours", "meal_logged_today", "med_adherence_pct_1d"
-    ]
-    
-    for feature in key_features:
-        if feature in df.columns:
-            null_pct = (df.filter(F.col(feature).isNull()).count() / df.count()) * 100
-            print(f"   {feature}: {100-null_pct:.1f}% complete")
-    
-    # Check 5: Sample eligibility flags
-    print(f"\n🏷️ Eligibility Flags Sample:")
-    sample_flags = (df.filter(
-        (F.size("eligible_positive_actions") > 0) | 
-        (F.size("eligible_opportunities") > 0)
-    ).select("patientid", "report_date", "eligible_positive_actions", "eligible_opportunities")
-    .limit(3))
-    
-    sample_flags.show(truncate=False)
-    
-    print("\n" + "="*80)
-    print("✅ DATA QUALITY CHECKS COMPLETE")
-    print("="*80)
-
-# Run quality checks
-run_data_quality_checks(gold_feature_table)
-
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## 16. Sample Queries for Validation
-
-# COMMAND ----------
-
-# Query 1: Show sample of features for one patient
-sample_patient = gold_feature_table.select("patientid").first()[0]
-
-print(f"Sample features for patient: {sample_patient}")
-(gold_feature_table
- .filter(F.col("patientid") == sample_patient)
- .orderBy(F.col("report_date").desc())
- .limit(7)
- .select(
-     "report_date",
-     "tir_pct",
-     "daily_step_count",
-     "active_minutes",
-     "sleep_duration_hours",
-     "eligible_positive_actions",
-     "eligible_opportunities"
- )
- .show(truncate=False))
-
-# COMMAND ----------
-
-# Query 2: Count of positive actions by type across all patients
-from pyspark.sql.functions import explode
-
-print("Distribution of positive actions:")
-(gold_feature_table
- .select(explode("eligible_positive_actions").alias("action"))
- .groupBy("action")
- .count()
- .orderBy(F.col("count").desc())
- .show(truncate=False))
-
-# COMMAND ----------
-
-# Query 3: Patients with high engagement (multiple positive actions)
-print("Patients with 3+ positive actions yesterday:")
-yesterday = F.date_sub(F.current_date(), 1)
-
-(gold_feature_table
- .filter(F.col("report_date") == yesterday)
- .filter(F.size("eligible_positive_actions") >= 3)
- .select(
-     "patientid",
-     "eligible_positive_actions",
-     "tir_pct",
-     "daily_step_count",
-     "sleep_rating"
- )
- .limit(10)
- .show(truncate=False))
-
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## Configuration Summary
-# MAGIC 
-# MAGIC **Configurable Parameters** (update in Section 1):
-# MAGIC - All source table names in `CONFIG["source_tables"]`
-# MAGIC - Gold table location: `CONFIG["gold_table"]`
-# MAGIC - Status ID values: `CONFIG["status_values"]`
-# MAGIC - All thresholds (TIR targets, step goals, etc.): `CONFIG["thresholds"]`
-# MAGIC - Processing mode (incremental/full refresh): `CONFIG["processing"]`
-# MAGIC - Journey config (when available): `CONFIG["journey_config"]`
-# MAGIC 
-# MAGIC **Next Steps**:
-# MAGIC 1. Validate A1C patient profile table and confirm enum values
-# MAGIC 2. Validate A1C patient profile table and add to config
-# MAGIC 3. Run this notebook to create feature store
-# MAGIC 4. Build LLM selection logic using the eligibility flags
-# MAGIC 5. Create MLflow model wrapper for serving
-# MAGIC 6. Deploy as Databricks Model Serving endpoint

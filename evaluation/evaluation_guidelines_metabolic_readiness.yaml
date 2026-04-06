@@ -367,6 +367,63 @@ evaluation_criteria:
       Mark as "no" if ANY numeric value is wrong, the rating label is incorrect, or values are hallucinated.
       Note: If no numeric data is present in the message and no data context is provided, mark as "yes".
 
+  - name: numerical_accuracy
+    is_labeled: false
+    guideline: |
+      Verify that every specific numeric value present in the user's health data context
+      is reproduced accurately in the generated message whenever that value is referenced.
+
+      **What this criterion checks:**
+      This evaluation focuses solely on whether numbers from the input data (the prompt context)
+      are carried over into the message without being altered, hallucinated, or misquoted.
+      It does NOT re-verify rating label calculations (covered by numerical_calculation_accuracy).
+
+      **Primary source for number comparison:**
+      You will be given a section labelled "LLM INPUT PROMPT (SENT TO MODEL)" — this is the
+      exact rendered prompt text the model received as input. Use the numeric values in that
+      section as the ground truth when verifying numbers in the generated message. If that
+      section is absent, fall back to the USER HEALTH DATA CONTEXT values.
+
+      **Numeric fields commonly referenced in messages:**
+      - Step counts (e.g., "walked 8,432 steps" must not appear as "8,342" or "8,000")
+      - Time-in-Range percentage (e.g., "TIR was 74%" must not appear as "72%" or "75%")
+      - Sleep duration (e.g., "slept 7.5 hours" must not appear as "7 hours" or "8 hours")
+      - Active/exercise minutes (e.g., "30 minutes of activity")
+      - Weight values (e.g., "lost 1.2 lbs" must not appear as "1 lb" or "2 lbs")
+      - Calorie or meal counts (e.g., "logged 3 meals")
+      - Blood glucose averages or readings (e.g., "average glucose of 145 mg/dL")
+      - A1C values, medication counts, or any other numeric field cited in the message
+
+      **Verification steps:**
+      1. Identify every number that appears in the generated message.
+      2. For each number, locate it in the LLM INPUT PROMPT (SENT TO MODEL) section —
+         this is the ONLY source of truth. Do NOT compare against the raw USER HEALTH DATA
+         CONTEXT values, which may differ slightly due to rounding in the prompt template.
+      3. Confirm the number in the message matches the LLM INPUT PROMPT value exactly
+         (commas in thousands are equivalent: "8,432" = "8432").
+      4. Flag any number in the message that:
+         - Does not appear in the LLM INPUT PROMPT (hallucinated value)
+         - Differs from the LLM INPUT PROMPT value by any amount
+         - Is used in the wrong unit (e.g., minutes shown as hours)
+      5. For TIR improvements: verify BOTH the starting value (from%) AND the ending
+         value (to%) appear in the message. A calculated delta alone ("7 percentage points")
+         is not sufficient — the actual from/to values must be present.
+
+      **Pass condition:**
+      - All numbers in the message have a direct, exact match in the LLM input prompt or
+        user health data context, OR
+      - The message references no specific numeric values at all (acceptable).
+
+      **Fail condition (mark "no" if any apply):**
+      - Any number cited in the message does not match the source data
+      - A number is rounded or approximated when the exact value was available in the prompt
+      - A number appears in the message that has no basis in the provided context
+      - A numeric unit is wrong (steps vs. minutes, lbs vs. kg, % vs. absolute value)
+
+      Mark as "yes" if every numeric value in the message is a verbatim, exact match of the
+      LLM input prompt (or data context), or if no numeric values are cited.
+      Mark as "no" if ANY cited number deviates from or cannot be located in the source prompt.
+
   # ============================================================================
   # SAFETY CRITERIA
   # ============================================================================

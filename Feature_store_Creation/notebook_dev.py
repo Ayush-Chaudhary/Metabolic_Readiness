@@ -27,16 +27,28 @@ dbutils.widgets.text("source_catalog",   "bronz_als_prod",          "Source Cata
 dbutils.widgets.text("gold_catalog",     "bronz_als_azuat2",           "Gold Catalog")
 dbutils.widgets.text("gold_schema",      "llm",                        "Gold Schema")
 dbutils.widgets.text("gold_table_name",  "user_daily_health_habits",   "Gold Table Name")
+dbutils.widgets.text("insight_date",     "",                            "Insight Date (YYYY-MM-DD, blank=today)")
 
 _source_catalog  = dbutils.widgets.get("source_catalog")
 _gold_catalog    = dbutils.widgets.get("gold_catalog")
 _gold_schema     = dbutils.widgets.get("gold_schema")
 _gold_table_name = dbutils.widgets.get("gold_table_name")
+_insight_date_raw = dbutils.widgets.get("insight_date").strip()
+
+# Resolve insight_date: defaults to today when blank; the feature store
+# will use (insight_date - 1 day) as the reference "yesterday" for features.
+from datetime import datetime as _dt, timedelta as _td
+if _insight_date_raw:
+    _insight_date = _dt.strptime(_insight_date_raw, "%Y-%m-%d").date()
+else:
+    _insight_date = _dt.now().date()
+_feature_date = _insight_date - _td(days=1)
 
 print(f"source_catalog  : {_source_catalog}")
 print(f"gold_catalog    : {_gold_catalog}")
 print(f"gold_schema     : {_gold_schema}")
 print(f"gold_table_name : {_gold_table_name}")
+print(f"insight_date    : {_insight_date}  (feature / yesterday: {_feature_date})")
 
 # COMMAND ----------
 
@@ -146,7 +158,7 @@ CONFIG: Dict[str, Any] = {
     # Processing Configuration
     "processing": {
         "incremental": True,  # Set to False for full refresh
-        "lookback_window_days": 90,  # How far back to process
+        "lookback_window_days": 35,  # 30-day max rolling window + 5-day buffer
         "partition_by": "report_date",
     }
 }
@@ -388,7 +400,7 @@ def create_activity_features() -> DataFrame:
     activity_df = add_local_date(activity_df, "observationdatetime")
     
     # Exclude meditation from activity metrics
-    physical_activity_df = activity_df#.filter(F.col("exercisetype") != meditation_type)
+    physical_activity_df = activity_df.filter(F.col("exercisetype") != meditation_type)
     
     # Calculate daily aggregations
     activity_daily = physical_activity_df.groupBy("patientid", "local_date").agg(
@@ -479,11 +491,16 @@ def create_steps_features() -> DataFrame:
                     "numberofsteps",
                     "startdatetime",
                     "enddatetime",
-                    "timezoneoffset"
+                    "timezoneoffset",
+                    "observationstatus"
                 ))
     
     # Apply timezone (use startdatetime for date bucketing)
     steps_df = add_local_date(steps_df, "startdatetime")
+    
+    # Filter to active/completed records and non-null step counts
+    steps_df = filter_active_records(steps_df, "observationstatus")
+    steps_df = steps_df.filter(F.col("numberofsteps").isNotNull())
     
     # Calculate daily totals
     steps_daily = steps_df.groupBy("patientid", "local_date").agg(
@@ -825,11 +842,75 @@ print("✓ Food with goals feature function created")
 
 # COMMAND ----------
 
+def _merge_sleep_intervals(pdf):
+    """
+    Merge overlapping or contained sleep intervals to prevent double-counting duration.
+    Called per (patientid, local_date) group via applyInPandas.
+
+    Algorithm (O(n log n)):
+      1. Sort by StartDateTime.
+      2. Walk the sorted list once. If the next session starts before the current
+         one ends, extend the current interval; otherwise close it and open a new one.
+
+    Returns a DataFrame with columns:
+      patientid, local_date, sleep_duration_hours, sleep_rating, sleep_entry_count
+    """
+    import pandas as pd
+
+    patientid  = pdf['patientid'].iloc[0]
+    local_date = pdf['local_date'].iloc[0]
+
+    # Ratings are per-session and not affected by overlap — average across original rows
+    avg_rating = pdf['sleeprating'].mean()
+    entry_count = len(pdf)
+
+    if pdf.empty:
+        return pd.DataFrame([{
+            'patientid': patientid,
+            'local_date': local_date,
+            'sleep_duration_hours': 0.0,
+            'sleep_rating': avg_rating,
+            'sleep_entry_count': 0,
+        }])
+
+    sorted_df = pdf.sort_values('startdatetime').reset_index(drop=True)
+    current_start = sorted_df.loc[0, 'startdatetime']
+    current_end   = sorted_df.loc[0, 'enddatetime']
+    total_seconds = 0.0
+
+    for i in range(1, len(sorted_df)):
+        row_start = sorted_df.loc[i, 'startdatetime']
+        row_end   = sorted_df.loc[i, 'enddatetime']
+        if row_start <= current_end:
+            # Overlapping or contained — extend current window
+            current_end = max(current_end, row_end)
+        else:
+            # Non-overlapping gap — commit current window
+            total_seconds += (current_end - current_start).total_seconds()
+            current_start = row_start
+            current_end   = row_end
+
+    # Commit final window
+    total_seconds += (current_end - current_start).total_seconds()
+
+    return pd.DataFrame([{
+        'patientid'           : str(patientid),
+        'local_date'          : local_date,
+        'sleep_duration_hours': total_seconds / 3600.0,
+        'sleep_rating'        : avg_rating,
+        'sleep_entry_count'   : int(entry_count),
+    }])
+
+
 def create_sleep_features() -> DataFrame:
     """
     Calculates sleep duration, ratings, and rolling averages.
+    Overlapping sleep intervals are merged before summing so duration is not
+    double-counted when the source table contains multiple overlapping sessions.
     """
-    
+    import pandas as pd
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType, LongType, DateType
+
     # Read sleep data
     sleep_df = (spark.read.table(get_table_path("sleep"))
                 .select(
@@ -840,23 +921,40 @@ def create_sleep_features() -> DataFrame:
                     "observationstatus",
                     "sleeprating"
                 ))
-    
-    # Apply timezone and filter
-    # Use enddatetime: sleep counts for the day it ended (when the patient woke up)
-    sleep_df = add_local_date(sleep_df, "enddatetime")
-    sleep_df = filter_active_records(sleep_df, "observationstatus")
-    
-    # Calculate sleep duration in hours
-    sleep_df = sleep_df.withColumn(
-        "sleep_duration_hours",
-        (F.unix_timestamp("enddatetime") - F.unix_timestamp("startdatetime")) / 3600
+
+    # Apply timezone offset to get local timestamps, then derive local_date from enddatetime
+    # (sleep counts for the day it ended — when the patient woke up)
+    sleep_df = (
+        sleep_df
+        .withColumn(
+            "startdatetime",
+            F.to_timestamp(F.from_unixtime(
+                F.unix_timestamp(F.col("startdatetime")) + (F.col("timezoneoffset") * 60)
+            ))
+        )
+        .withColumn(
+            "enddatetime",
+            F.to_timestamp(F.from_unixtime(
+                F.unix_timestamp(F.col("enddatetime")) + (F.col("timezoneoffset") * 60)
+            ))
+        )
+        .withColumn("local_date", F.to_date(F.col("enddatetime")))
     )
-    
-    # Group by patient and date (in case multiple sleep sessions per day)
-    sleep_daily = sleep_df.groupBy("patientid", "local_date").agg(
-        F.sum("sleep_duration_hours").alias("sleep_duration_hours"),
-        F.avg("sleeprating").alias("sleep_rating"),
-        F.count("*").alias("sleep_entry_count")
+
+    sleep_df = filter_active_records(sleep_df, "observationstatus")
+
+    # Schema returned by _merge_sleep_intervals
+    merge_schema = StructType([
+        StructField("patientid",            StringType(), True),
+        StructField("local_date",           DateType(),   True),
+        StructField("sleep_duration_hours", DoubleType(), True),
+        StructField("sleep_rating",         DoubleType(), True),
+        StructField("sleep_entry_count",    LongType(),   True),
+    ])
+
+    # Merge overlapping intervals per (patientid, local_date) group
+    sleep_daily = sleep_df.groupBy("patientid", "local_date").applyInPandas(
+        _merge_sleep_intervals, schema=merge_schema
     )
     
     # Add day-over-day deltas
@@ -2453,7 +2551,7 @@ print("Distribution of positive actions:")
 
 # Query 3: Patients with high engagement (multiple positive actions)
 print("Patients with 3+ positive actions yesterday:")
-yesterday = F.date_sub(F.current_date(), 1)
+yesterday = F.lit(_feature_date)
 
 (gold_feature_table
  .filter(F.col("report_date") == yesterday)

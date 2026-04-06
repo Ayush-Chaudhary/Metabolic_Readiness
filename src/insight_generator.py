@@ -72,7 +72,8 @@ class InsightGenerator:
         rating_description: str,
         positive_actions: list,
         opportunity: dict,
-        greeting: str
+        greeting: str,
+        weekly_context: str = ""
     ) -> str:
         """
         Format the user prompt with selected content.
@@ -83,6 +84,8 @@ class InsightGenerator:
             positive_actions: List of selected positive action dicts
             opportunity: Selected opportunity dict
             greeting: Time-appropriate greeting
+            weekly_context: Optional string describing weekly trends that
+                influenced the opportunity selection
             
         Returns:
             Formatted prompt string
@@ -96,12 +99,19 @@ class InsightGenerator:
         # Get opportunity text
         opp_text = opportunity.get('text', 'Browse the Explore section to learn more.')
         
+        # Build weekly context block
+        if weekly_context:
+            weekly_block = f"Weekly context that influenced the suggestion:\n{weekly_context}"
+        else:
+            weekly_block = ""
+        
         return self.user_prompt_template.format(
             daily_rating=daily_rating,
             rating_description=rating_description,
             positive_facts_list=facts_list,
             opportunity_suggestion=opp_text,
-            greeting=greeting
+            greeting=greeting,
+            weekly_context=weekly_block
         )
     
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
@@ -222,6 +232,12 @@ class InsightGenerator:
             "4. Informal or incorrect grammar\n"
             "5. Reading level above 7th grade (simplify complex words)\n"
             "6. Sentences longer than 12 words (split them)\n\n"
+            "IMPORTANT TONE RULES — do NOT violate these:\n"
+            "- Do NOT make the tone more blunt or direct. Preserve warmth and encouragement.\n"
+            "- Do NOT remove hedging language ('might', 'could', 'consider'). These are intentional.\n"
+            "- Do NOT add presumptive language about how the user feels (e.g. 'to help with stress').\n"
+            "- Do NOT state that the user did NOT do something (e.g. 'you were not active').\n"
+            "- Keep suggestions framed as invitations, not commands.\n\n"
             "If the message has NO issues, respond with exactly: PASS\n"
             "If the message has issues, respond with ONLY the corrected message text. "
             "Do not add explanations, labels, or commentary."
@@ -240,7 +256,7 @@ class InsightGenerator:
                 messages=[
                     ChatMessage(
                         role=ChatMessageRole.SYSTEM,
-                        content="You are a language quality reviewer. Fix grammar, spelling, and readability issues in health coaching messages. Keep the same meaning and tone."
+                        content="You are a language quality reviewer. Fix grammar, spelling, and readability issues in health coaching messages. Keep the same meaning, tone, and warmth. Never make the message more blunt or direct. Preserve encouraging language."
                     ),
                     ChatMessage(
                         role=ChatMessageRole.USER,
@@ -270,7 +286,8 @@ class InsightGenerator:
         rating_description: str,
         positive_actions: list,
         opportunity: dict,
-        greeting: str = "Good morning."
+        greeting: str = "Good morning.",
+        weekly_context: str = ""
     ) -> Dict[str, Any]:
         """
         Generate a personalized health insight message.
@@ -281,6 +298,8 @@ class InsightGenerator:
             positive_actions: List of selected positive action dicts
             opportunity: Selected opportunity dict
             greeting: Time-appropriate greeting
+            weekly_context: Optional weekly trend context that influenced
+                opportunity selection
             
         Returns:
             Dict containing:
@@ -297,7 +316,8 @@ class InsightGenerator:
             rating_description=rating_description,
             positive_actions=positive_actions,
             opportunity=opportunity,
-            greeting=greeting
+            greeting=greeting,
+            weekly_context=weekly_context
         )
         
         logger.info("Generating insight for user")

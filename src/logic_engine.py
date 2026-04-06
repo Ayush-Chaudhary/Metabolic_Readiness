@@ -41,12 +41,20 @@ class A1CTargetGroup(Enum):
 FOCUS_CATEGORY_MAP: Dict[str, List[str]] = {
     'Weight':        ['weight', 'glucose', 'food', 'activity', 'steps', 'sleep'],
     'Glucose':       ['glucose', 'food', 'activity', 'medications'],
-    'Activity':      ['activity', 'steps', 'sleep'],
-    'Eating Habits': ['food', 'weight'],
+    'Activity':      ['activity', 'steps'],
+    'Eating Habits': ['food'],
     'Sleep':         ['sleep', 'activity'],
     'Medications':   ['medications', 'glucose'],
     'Anxiety':       ['mental_wellbeing', 'sleep', 'activity'],
 }
+
+# Clinical safety opportunities that must NEVER be filtered out by focus area.
+# These are high-priority clinical recommendations (e.g. contact provider for
+# dangerously low glucose) that must surface regardless of the user's focus.
+CLINICAL_SAFETY_OPPORTUNITIES = frozenset({
+    'glucose_contact_provider',
+    'glucose_take_medication',
+})
 
 
 # ============================================================================
@@ -298,6 +306,7 @@ class MessageHistory:
     weight_messages_this_week: int = 0
     weight_shown_yesterday: bool = False
     category_streaks: Dict[str, int] = field(default_factory=dict)  # category -> consecutive days
+    keys_shown_last_6d: List[str] = field(default_factory=list)  # specific action/opportunity keys shown
 
 
 @dataclass
@@ -377,8 +386,8 @@ class LogicEngine:
             focus_to_category = {
                 'Weight': ['weight', 'glucose', 'food_logging', 'nutrient_targets', 'activity', 'steps', 'sleep_duration', 'sleep_rating'],
                 'Glucose': ['glucose', 'food_logging', 'nutrient_targets', 'activity', 'medications'],
-                'Activity': ['activity', 'steps', 'sleep_duration', 'sleep_rating'],
-                'Eating Habits': ['food_logging', 'nutrient_targets', 'weight'],
+                'Activity': ['activity', 'steps'],
+                'Eating Habits': ['food_logging', 'nutrient_targets'],
                 'Sleep': ['sleep_duration', 'sleep_rating', 'activity'],
                 'Medications': ['medications', 'glucose'],
                 'Anxiety': ['mental_wellbeing', 'sleep_duration', 'sleep_rating', 'activity']
@@ -1004,11 +1013,13 @@ class LogicEngine:
         # === WEIGHT OPPORTUNITIES ===
         # Spec: "If it's been more than 6 days since last weight entry,
         # gently prompt user to log a weight entry" — no goal requirement.
+        # Priority is raised when days > 6 because the prompt is clinically
+        # relevant (user hasn't logged in over a week).
         if safe_gt(user.days_since_last_weight, self.thresholds['weight']['log_prompt_days']):
             eligible.append({
                 'key': 'weight_log_prompt',
                 'category': 'weight',
-                'priority': 80 if user.has_weight_goal else 40
+                'priority': 80 if user.has_weight_goal else 70
             })
         
         # === GLUCOSE OPPORTUNITIES ===
@@ -1189,10 +1200,14 @@ class LogicEngine:
             if (safe_lt(user.med_adherence_7d_avg, self.thresholds['medication']['adherence_opportunity_pct'])
                     and not user.med_reminders_enabled
                     and not user.took_all_meds):
+                # Boost priority when Medications is the user's focus — must outrank
+                # glucose opportunities (up to 96) so the med reminder surfaces.
+                _med_focus = user.user_focus is not None and 'Medications' in user.user_focus
+                _med_priority = 97 if _med_focus else 80
                 eligible.append({
                     'key': 'medication_reminders',
                     'category': 'medications',
-                    'priority': 80
+                    'priority': _med_priority
                 })
         
         # === MENTAL WELL-BEING OPPORTUNITIES ===
@@ -1225,13 +1240,15 @@ class LogicEngine:
                 'priority': _mw_priority_hi
             })
         
-        # === FALLBACK: EXPLORE ===
-        if len(eligible) == 0:
-            eligible.append({
-                'key': 'explore_browse',
-                'category': 'explore',
-                'priority': 10
-            })
+        # === EXPLORE ===
+        # Always add explore as a low-priority fallback.  In select_content,
+        # if the winning opportunity is a "filler" type with low priority,
+        # explore_browse can surface instead.
+        eligible.append({
+            'key': 'explore_browse',
+            'category': 'explore',
+            'priority': 10
+        })
         
         return eligible
     
@@ -1280,7 +1297,7 @@ class LogicEngine:
             print(f"  ❌ Error in get_eligible_opportunities: {e}")
             raise
         
-        # Filter by focus area
+        # Filter by focus area — but always keep clinical safety opportunities
         filtered_actions = [
             a for a in all_actions 
             if self._is_category_allowed(a['category'], user)
@@ -1289,6 +1306,7 @@ class LogicEngine:
         filtered_opportunities = [
             o for o in all_opportunities 
             if self._is_category_allowed(o['category'], user)
+            or o['key'] in CLINICAL_SAFETY_OPPORTUNITIES
         ]
         
         # Fallback: if focus filtering eliminated everything, use unfiltered lists
@@ -1305,6 +1323,36 @@ class LogicEngine:
                 action['key'], user, history
             )
         
+        # Apply focus area boost to opportunities.
+        # Requirements: "If user has focus set, prioritize area of opportunity
+        # from the most relevant categories to that focus."
+        if user.user_focus:
+            focus_boost = self.priority_rules['user_focus_area']
+            for opp in filtered_opportunities:
+                category = opp.get('category', '')
+                for focus_name in user.user_focus:
+                    if category in FOCUS_CATEGORY_MAP.get(focus_name, []):
+                        opp['priority'] = opp.get('priority', 0) + focus_boost
+                        break  # One boost per opportunity, even if multiple focuses match
+        
+        # Apply not-shown-in-6-days novelty boost to opportunities.
+        # Requirements: "If user has a qualifying area of opportunity that they
+        # have not had in the last 6 days, prioritize showing that positive action."
+        novelty_boost = self.priority_rules['not_shown_6_days']
+        for opp in filtered_opportunities:
+            category = opp.get('category', '')
+            if category not in history.categories_shown_last_6d:
+                opp['priority'] = opp.get('priority', 0) + novelty_boost
+        
+        # Apply streak penalty to opportunities (same as actions).
+        # Requirements: "If user is excelling in one category for 3 days in a row,
+        # prioritize a different category on day 4."
+        for opp in filtered_opportunities:
+            category = opp.get('category', '')
+            streak_days = history.category_streaks.get(category, 0)
+            if streak_days >= self.priority_rules['streak_override_days']:
+                opp['priority'] = opp.get('priority', 0) - self.priority_rules['streak_priority_penalty']
+        
         # Sort by priority (higher = better).
         # Random jitter breaks ties so equal-priority categories rotate across days.
         filtered_actions.sort(
@@ -1314,11 +1362,27 @@ class LogicEngine:
             key=lambda x: (x.get('priority', 0), random.random()), reverse=True
         )
         
+        # Special case: Journey task completed takes precedence over everything.
+        # Per requirements: "If user completes a journey task, one of the positive
+        # actions should be journey and it should take precedence."
+        # Journey is exempt from focus area filtering — it always gets a slot.
+        selected_actions = []
+        if user.has_active_journey and user.journey_task_completed:
+            # Search unfiltered all_actions (journey may have been removed by focus filter)
+            journey_actions = [a for a in all_actions if a['key'] == 'journey_task_completed']
+            if journey_actions:
+                # Calculate its priority for the record
+                journey_actions[0]['priority'] = self._calculate_action_priority(
+                    'journey_task_completed', user, history
+                )
+                selected_actions.append(journey_actions[0])
+                # Remove journey from remaining pool
+                filtered_actions = [a for a in filtered_actions if a['key'] != 'journey_task_completed']
+        
         # Special case: CGM users with qualifying glucose data always get glucose
         # as one positive action.  Per requirements: "If user has CGM and previous
         # day's TIR met the target OR was better than the day before, include in
         # summary every day AND include an additional positive action."
-        selected_actions = []
         if user.has_cgm:
             thresholds = self.thresholds['glucose'][user.effective_a1c_group.value]
             tir_met_target = safe_gte(user.tir_pct, thresholds['tir_positive_threshold'])
@@ -1423,8 +1487,8 @@ class LogicEngine:
         if not suggestions:
             return {'key': 'sleep_improvement', 'template': 'Try to improve your sleep tonight'}
         
-        # Filter out suggestions shown in last 6 days (by key)
-        shown_keys = set(history.categories_shown_last_6d)
+        # Filter out suggestions shown in last 6 days (by specific key, not broad category)
+        shown_keys = set(history.keys_shown_last_6d)
         unseen = [s for s in suggestions if s.get('key', '') not in shown_keys]
         
         # Pick from unseen if available, otherwise pick from all
@@ -1450,8 +1514,8 @@ class LogicEngine:
         if not suggestions:
             return {'key': 'food_healthy', 'template': 'Try to eat a healthy meal today'}
         
-        # Filter out suggestions shown in last 6 days (by key)
-        shown_keys = set(history.categories_shown_last_6d)
+        # Filter out suggestions shown in last 6 days (by specific key, not broad category)
+        shown_keys = set(history.keys_shown_last_6d)
         unseen = [s for s in suggestions if s.get('key', '') not in shown_keys]
         
         # Pick from unseen if available, otherwise pick from all
@@ -1559,7 +1623,7 @@ def load_message_history(
     spark,
     patient_id: str,
     history_table: str,
-    lookback_days: int = 6
+    lookback_days: int = 7
 ) -> MessageHistory:
     """
     Load message history for frequency capping.
@@ -1568,25 +1632,27 @@ def load_message_history(
         spark: SparkSession
         patient_id: The patient ID
         history_table: Full path to message history table
-        lookback_days: Number of days to look back
+        lookback_days: Number of days to look back (default 7 for weight window)
     
     Returns:
         MessageHistory with recent message data
     """
     from datetime import datetime, timedelta
+    from collections import defaultdict
     
     start_date = (datetime.now() - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
+    lookback_6d = (datetime.now() - timedelta(days=6)).strftime('%Y-%m-%d')
+    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    # Query message history
+    # Query message history — include opportunity_used for key-level tracking
     query = f"""
     SELECT 
         category,
         message_date,
-        COUNT(*) as count
+        opportunity_used
     FROM {history_table}
     WHERE patientid = '{patient_id}'
     AND message_date >= '{start_date}'
-    GROUP BY category, message_date
     ORDER BY message_date DESC
     """
     
@@ -1596,19 +1662,50 @@ def load_message_history(
         # Table might not exist yet
         return MessageHistory(patient_id=patient_id)
     
-    categories_shown = list(set(row['category'] for row in rows))
+    # categories_shown_last_6d — within 6-day window only
+    categories_shown = list(set(
+        row['category'] for row in rows
+        if str(row['message_date']) >= lookback_6d
+    ))
     
-    # Count weight messages this week
-    week_start = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-    weight_count = sum(1 for row in rows if row['category'] == 'weight' and row['message_date'] >= week_start)
+    # keys_shown_last_6d — specific opportunity keys within 6-day window
+    keys_shown = list(set(
+        row['opportunity_used'] for row in rows
+        if str(row['message_date']) >= lookback_6d and row.get('opportunity_used')
+    ))
+    
+    # Count weight messages this week (full 7-day window)
+    weight_count = sum(1 for row in rows if row['category'] == 'weight')
     
     # Check if weight was shown yesterday
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    weight_yesterday = any(row['category'] == 'weight' and str(row['message_date']) == yesterday for row in rows)
+    weight_yesterday = any(
+        row['category'] == 'weight' and str(row['message_date']) == yesterday
+        for row in rows
+    )
+    
+    # category_streaks — consecutive days ending at yesterday
+    category_dates: dict = defaultdict(set)
+    for row in rows:
+        category_dates[row['category']].add(str(row['message_date']))
+    
+    streaks = {}
+    yesterday_dt = datetime.now() - timedelta(days=1)
+    for cat, dates in category_dates.items():
+        streak = 0
+        for i in range(lookback_days):
+            check_date = (yesterday_dt - timedelta(days=i)).strftime('%Y-%m-%d')
+            if check_date in dates:
+                streak += 1
+            else:
+                break
+        if streak > 0:
+            streaks[cat] = streak
     
     return MessageHistory(
         patient_id=patient_id,
         categories_shown_last_6d=categories_shown,
         weight_messages_this_week=weight_count,
-        weight_shown_yesterday=weight_yesterday
+        weight_shown_yesterday=weight_yesterday,
+        category_streaks=streaks,
+        keys_shown_last_6d=keys_shown
     )

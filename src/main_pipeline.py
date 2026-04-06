@@ -31,6 +31,15 @@ from mlflow.models.resources import (
   DatabricksTable,
 )
 
+from pipeline_utils import (
+    get_full_table_name,
+    get_user_profile,
+    build_user_context,
+    create_history_table,
+    get_message_history,
+    write_patient_history,
+)
+
 # ===== PIPELINE CONFIGURATION =====
 PIPELINE_CONFIG: Dict[str, Any] = {
     # Gold Table (Feature Store)
@@ -57,10 +66,6 @@ PIPELINE_CONFIG: Dict[str, Any] = {
     # Config file path (for prompts)
     "prompts_config_path": "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/prompts.yml",
 }
-
-def get_full_table_name(table_config: dict) -> str:
-    """Build full table name from config."""
-    return f"{table_config['catalog']}.{table_config['schema']}.{table_config['table_name']}"
 
 print("✓ Configuration loaded")
 
@@ -114,255 +119,14 @@ def get_user_features(spark, patient_id: str, report_date: datetime) -> Optional
         return None
 
 
-def get_user_profile(spark, patient_id: str) -> Dict[str, Any]:
-    """Fetch user profile information."""
-    # Default profile - can be extended to query actual profile table
-    return {
-        'patient_id': patient_id,
-        'user_focus': None,
-        'a1c_target_group': None
-    }
-
-
-def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> UserContext:
-    """Build UserContext object from features and profile data."""
-    a1c_mapping = {
-        'dm_target_7': A1CTargetGroup.DM_TARGET_7,
-        'dm_target_8': A1CTargetGroup.DM_TARGET_8,
-        'dip': A1CTargetGroup.DIP,
-        'non_dm': A1CTargetGroup.NON_DM,
-    }
-    
-    a1c_group = a1c_mapping.get(
-        features.get('a1c_target_group'),  # Read from Gold table features
-        None  # stays None — effective_a1c_group in logic_engine will fall back to DM_TARGET_7
-    )
-    
-    return UserContext(
-        patient_id=profile['patient_id'],
-        report_date=datetime.now() - timedelta(days=1),
-        
-        # Device/goal flags
-        has_cgm=bool(features.get('has_cgm_connected', False)),
-        has_step_tracker=bool(features.get('has_step_tracker', False)),
-        has_medications=bool((features.get('active_prescription_count') or 0) > 0),
-        has_weight_goal=bool(features.get('has_weight_goal', False)),
-        weight_goal_type=features.get('weight_goal_type'),
-        has_active_journey=bool(features.get('has_active_journey', False)),
-        has_exercise_program=bool(features.get('has_active_exercise_program', False)),
-        user_focus=features.get('user_focus', '').split(',') if features.get('user_focus') else None,
-        a1c_target_group=a1c_group,
-        med_reminders_enabled=bool(features.get('med_reminders_enabled', False)),
-        
-        # Health metrics
-        tir_pct=features.get('tir_pct'),
-        tir_prev_day=features.get('tir_pct_delta_1d'),
-        glucose_high_pct=features.get('glucose_high_pct'),
-        glucose_low_pct=features.get('glucose_low_pct'),
-        daily_step_count=features.get('daily_step_count'),
-        prev_day_steps=features.get('daily_step_count_delta_1d'),
-        active_minutes=features.get('active_minutes'),
-        prev_day_active_minutes=features.get('active_minutes_delta_1d'),
-        weekly_active_minutes=features.get('active_minutes_7d_sum'),
-        exercise_video_completion_pct=features.get('exercise_video_completion_pct'),
-        sleep_duration_hours=features.get('sleep_duration_hours'),
-        prev_day_sleep_hours=features.get('sleep_duration_hours_delta_1d'),
-        sleep_rating=features.get('sleep_rating'),
-        prev_day_sleep_rating=features.get('sleep_rating_delta_1d'),
-        avg_sleep_hours_7d=features.get('sleep_duration_hours_avg_7d'),
-        avg_sleep_rating_7d=features.get('sleep_rating_avg_7d'),
-        weight_logged_yesterday=bool(features.get('weight_logged_today', False)),
-        weight_change_pct=features.get('weight_change_pct'),
-        weight_change_lbs_14d=features.get('weight_change_lbs_14d'),
-        weight_change_pct_14d=features.get('weight_change_pct_14d'),
-        days_since_last_weight=features.get('days_since_last_weight'),
-        weight_last_logged_7d=features.get('weight_last_logged_7d'),
-        weight_last_logged_14d=features.get('weight_last_logged_14d'),
-        weight_last_logged_30d=features.get('weight_last_logged_30d'),
-        is_within_maintenance_range=bool(features.get('is_within_maintenance_range', False)),
-        meals_logged_count=features.get('unique_meals_logged'),
-        last_meal_type=features.get('last_meal_type'),
-        any_nutrient_target_met=bool(features.get('any_nutrient_target_met', False)),
-        total_nutrient_targets=features.get('total_nutrient_targets', 0),
-        nutrient_name_met=features.get('nutrient_name_met'),
-        days_with_meals_7d=features.get('days_with_meals_7d'),
-        has_nutrient_goals=bool(features.get('has_nutrient_goals', False)),
-        took_all_meds=bool(features.get('took_all_meds', False)),
-        med_adherence_7d_avg=features.get('med_adherence_7d_avg'),
-        takes_glycemic_lowering_med=bool(features.get('takes_glycemic_lowering_med', False)),
-        glycemic_med_adherent=bool(features.get('glycemic_med_adherent', False)),
-        meditation_opened_30d=bool(features.get('meditation_opened_30d', False)),
-        journal_entry_30d=bool(features.get('journal_entry_30d', False)),
-        action_plan_progress_30d=bool(features.get('action_plan_progress_30d', False)),
-        
-        # Mental wellbeing 7-day fields
-        action_plan_active=bool(features.get('action_plan_active', False)),
-        journal_entry_7d=bool(features.get('journal_entry_7d', False)),
-        meditation_opened_7d=bool(features.get('meditation_opened_7d', False)),
-        
-        # Journey tracking fields
-        journey_task_completed=bool(features.get('journey_task_completed', False)),
-        has_completed_journey=bool(features.get('has_completed_journey', False)),
-        active_journey_count=features.get('active_journey_count', 0) or 0,
-        completed_journey_count=features.get('completed_journey_count', 0) or 0,
-        
-        # Exercise Video tracking fields
-        exercise_video_completed_today=bool(features.get('exercise_video_completed_today', False)),
-        exercise_video_completed_7d=bool(features.get('exercise_video_completed_7d', False)),
-        has_exercise_video_activity=bool(features.get('has_exercise_video_activity', False)),
-        has_completed_video_ever=bool(features.get('has_completed_video_ever', False)),
-        total_videos_completed=features.get('total_videos_completed', 0) or 0,
-        
-        # Exercise Program tracking fields
-        has_active_exercise_program=bool(features.get('has_active_exercise_program', False)),
-        has_completed_exercise_program=bool(features.get('has_completed_exercise_program', False)),
-        exercise_program_started_today=bool(features.get('exercise_program_started_today', False)),
-        exercise_program_completed_today=bool(features.get('exercise_program_completed_today', False)),
-        exercise_program_progress_today=bool(features.get('exercise_program_progress_today', False)),
-        exercise_program_progress_7d=bool(features.get('exercise_program_progress_7d', False)),
-        active_program_count=features.get('active_program_count', 0) or 0,
-        
-        # Bonus activity tracking
-        bonus_exercise_video_completed=bool(features.get('exercise_video_completed_today', False)),
-        bonus_exercise_program_started=bool(features.get('exercise_program_started_today', False)),
-        bonus_grocery_online=bool(features.get('grocery_shopped_today', False)),
-        
-        app_login_yesterday=bool(features.get('app_login_yesterday', True)),
-        eligible_positive_actions=features.get('eligible_positive_actions', []),
-        eligible_opportunities=features.get('eligible_opportunities', [])
-    )
-
-
-def get_message_history(spark, patient_id: str) -> MessageHistory:
-    """Fetch message history for frequency capping."""
-    history = MessageHistory(patient_id=patient_id)
-    
-    try:
-        history_table = get_full_table_name(PIPELINE_CONFIG['history_table'])
-        lookback_date = (datetime.now() - timedelta(days=6)).strftime('%Y-%m-%d')
-        
-        query = f"""
-        SELECT category, message_date
-        FROM {history_table}
-        WHERE patientid = '{patient_id}'
-        AND message_date >= '{lookback_date}'
-        """
-        
-        rows = spark.sql(query).collect()
-        
-        history.categories_shown_last_6d = list(set(row['category'] for row in rows))
-        history.weight_messages_this_week = sum(1 for row in rows if row['category'] == 'weight')
-        
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        history.weight_shown_yesterday = any(
-            row['category'] == 'weight' and str(row['message_date']) == yesterday 
-            for row in rows
-        )
-        
-    except Exception as e:
-        print(f"Info: Could not load message history (table may not exist yet): {e}")
-    
-    return history
-
-
-def extract_categories_from_actions(action_keys: List[str]) -> set:
-    """Extract category names from action keys."""
-    categories = set()
-    
-    category_mapping = {
-        'glucose': ['glucose_'],
-        'steps': ['steps_'],
-        'activity': ['activity_', 'exercise_'],
-        'sleep': ['sleep_'],
-        'weight': ['weight_'],
-        'food': ['meal_', 'nutrient_', 'food_'],
-        'medications': ['medication_', 'med_'],
-        'mental_wellbeing': ['mental_', 'meditation_', 'journal_'],
-        'journey': ['journey_'],
-        'explore': ['explore_']
-    }
-    
-    for action_key in action_keys:
-        for category, prefixes in category_mapping.items():
-            if any(action_key.startswith(prefix) for prefix in prefixes):
-                categories.add(category)
-                break
-    
-    return categories
+# Backward-compatible aliases (used by insight_generation_job debug section)
+from pipeline_utils import _extract_categories_from_actions as extract_categories_from_actions
 
 
 def upsert_message_history(spark, patient_id: str, message_date: str, result: Dict[str, Any]) -> None:
-    """
-    Upsert message to history table using MERGE for low-latency overwrites.
-    
-    Args:
-        spark: SparkSession
-        patient_id: Patient ID
-        message_date: Message date (YYYY-MM-DD)
-        result: Generation result with message, rating, actions, etc.
-    """
-    try:
-        history_table = get_full_table_name(PIPELINE_CONFIG['history_table'])
-        
-        # Extract categories from actions and opportunity
-        action_keys = result.get('positive_actions_used', [])
-        opp_key = result.get('opportunity_used', '')
-        all_keys = action_keys + ([opp_key] if opp_key else [])
-        categories = extract_categories_from_actions(all_keys)
-        
-        # Escape message text for SQL
-        escaped_message = result['message'].replace("'", "''")
-        rating_desc_escaped = result.get('rating_description', '').replace("'", "''")
-        
-        # Convert arrays to SQL format
-        actions_array = "array('" + "','".join(action_keys) + "')" if action_keys else "array()"
-        
-        # Use MERGE for efficient upsert (single operation per category)
-        for category in categories:
-            merge_sql = f"""
-            MERGE INTO {history_table} AS target
-            USING (
-                SELECT 
-                    '{patient_id}' AS patientid,
-                    '{category}' AS category,
-                    '{message_date}' AS message_date,
-                    '{escaped_message}' AS message_text,
-                    '{result.get('rating', '')}' AS rating,
-                    '{rating_desc_escaped}' AS rating_description,
-                    {actions_array} AS positive_actions_used,
-                    '{opp_key}' AS opportunity_used,
-                    {result.get('character_count', 0)} AS character_count,
-                    {result.get('word_count', 0)} AS word_count,
-                    current_timestamp() AS created_at
-            ) AS source
-            ON target.patientid = source.patientid 
-                AND target.category = source.category
-                AND target.message_date = source.message_date
-            WHEN MATCHED THEN
-                UPDATE SET
-                    target.message_text = source.message_text,
-                    target.rating = source.rating,
-                    target.rating_description = source.rating_description,
-                    target.positive_actions_used = source.positive_actions_used,
-                    target.opportunity_used = source.opportunity_used,
-                    target.character_count = source.character_count,
-                    target.word_count = source.word_count,
-                    target.created_at = source.created_at
-            WHEN NOT MATCHED THEN
-                INSERT (patientid, category, message_date, message_text, rating,
-                        rating_description, positive_actions_used, opportunity_used,
-                        character_count, word_count, created_at)
-                VALUES (source.patientid, source.category, source.message_date, 
-                        source.message_text, source.rating, source.rating_description,
-                        source.positive_actions_used, source.opportunity_used,
-                        source.character_count, source.word_count, source.created_at)
-            """
-            spark.sql(merge_sql)
-            
-        print(f"✓ Message upserted to history for {len(categories)} categories")
-        
-    except Exception as e:
-        print(f"Warning: Could not log message history: {e}")
+    """Upsert message to history table — delegates to pipeline_utils.write_patient_history."""
+    history_table = get_full_table_name(PIPELINE_CONFIG['history_table'])
+    write_patient_history(spark, patient_id, message_date, result, history_table)
 
 
 print("✓ Helper functions defined")
@@ -472,7 +236,7 @@ class MessageGenerationModel:
                 print(f"  ✓ Features loaded: {len(features)} fields")
             
             # Step 2: Get user profile
-            profile = get_user_profile(self.spark, patient_id)
+            profile = get_user_profile(patient_id)
             
             # Step 3: Build user context
             if verbose:
@@ -482,7 +246,7 @@ class MessageGenerationModel:
             # Step 4: Get message history
             if verbose:
                 print("  → Loading message history...")
-            history = get_message_history(self.spark, patient_id)
+            history = get_message_history(self.spark, patient_id, get_full_table_name(PIPELINE_CONFIG['history_table']))
             
             # Step 5: Run logic engine to select content
             if verbose:
