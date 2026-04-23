@@ -17,6 +17,48 @@ def get_user_profile(patient_id: str) -> Dict[str, Any]:
     }
 
 
+def _derive_weight_logged_flags(features: Dict[str, Any]) -> Dict[str, bool]:
+    """Derive weight_last_logged_7d/14d/30d from days_since_last_weight."""
+    days = features.get('days_since_last_weight')
+    return {
+        'weight_last_logged_7d': days is not None and days <= 7,
+        'weight_last_logged_14d': days is not None and days <= 14,
+        'weight_last_logged_30d': days is not None and days <= 30,
+    }
+
+
+def _derive_nutrient_fields(features: Dict[str, Any]) -> Dict[str, Any]:
+    """Derive nutrient scoring fields from individual *_target_pct columns."""
+    # The Gold table has: protein_target_pct, carbs_target_pct, fat_target_pct,
+    # calories_target_pct (% of goal, e.g. 95.0 means 95% of goal met).
+    # Also: goal_protein, goal_carbs, goal_fat, goal_calories (the raw goals).
+    nutrient_pcts = {}
+    nutrient_names = ['protein', 'carbs', 'fat', 'calories']
+    first_met_name = None
+
+    for name in nutrient_names:
+        pct = features.get(f'{name}_target_pct')
+        has_goal = features.get(f'goal_{name}') is not None and (features.get(f'goal_{name}') or 0) > 0
+        if has_goal:
+            nutrient_pcts[name] = pct
+            if first_met_name is None and pct is not None and 90 <= pct <= 110:
+                first_met_name = name
+
+    total = len(nutrient_pcts)
+    count_90_110 = sum(1 for p in nutrient_pcts.values() if p is not None and 90 <= p <= 110)
+    count_60_plus = sum(1 for p in nutrient_pcts.values() if p is not None and p >= 60)
+    count_30_plus = sum(1 for p in nutrient_pcts.values() if p is not None and p >= 30)
+
+    return {
+        'has_nutrient_goals': total > 0,
+        'total_nutrient_targets': total,
+        'num_nutrient_targets_90_110': count_90_110,
+        'num_nutrient_targets_60_plus': count_60_plus,
+        'num_nutrient_targets_30_plus': count_30_plus,
+        'nutrient_name_met': first_met_name,
+    }
+
+
 def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> UserContext:
     """Build UserContext object from features and profile data."""
     a1c_mapping = {
@@ -30,6 +72,9 @@ def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> Use
         features.get('a1c_target_group'),
         None
     )
+
+    weight_flags = _derive_weight_logged_flags(features)
+    nutrient_fields = _derive_nutrient_fields(features)
 
     return UserContext(
         patient_id=profile['patient_id'],
@@ -69,17 +114,20 @@ def build_user_context(features: Dict[str, Any], profile: Dict[str, Any]) -> Use
         weight_change_lbs_14d=features.get('weight_change_lbs_14d'),
         weight_change_pct_14d=features.get('weight_change_pct_14d'),
         days_since_last_weight=features.get('days_since_last_weight'),
-        weight_last_logged_7d=features.get('weight_last_logged_7d'),
-        weight_last_logged_14d=features.get('weight_last_logged_14d'),
-        weight_last_logged_30d=features.get('weight_last_logged_30d'),
+        weight_last_logged_7d=weight_flags['weight_last_logged_7d'],
+        weight_last_logged_14d=weight_flags['weight_last_logged_14d'],
+        weight_last_logged_30d=weight_flags['weight_last_logged_30d'],
         is_within_maintenance_range=bool(features.get('is_within_maintenance_range', False)),
         meals_logged_count=features.get('unique_meals_logged'),
         last_meal_type=features.get('last_meal_type'),
         any_nutrient_target_met=bool(features.get('any_nutrient_target_met', False)),
-        total_nutrient_targets=features.get('total_nutrient_targets', 0),
-        nutrient_name_met=features.get('nutrient_name_met'),
+        total_nutrient_targets=nutrient_fields['total_nutrient_targets'],
+        num_nutrient_targets_90_110=nutrient_fields['num_nutrient_targets_90_110'],
+        num_nutrient_targets_60_plus=nutrient_fields['num_nutrient_targets_60_plus'],
+        num_nutrient_targets_30_plus=nutrient_fields['num_nutrient_targets_30_plus'],
+        nutrient_name_met=nutrient_fields['nutrient_name_met'],
         days_with_meals_7d=features.get('days_with_meals_7d'),
-        has_nutrient_goals=bool(features.get('has_nutrient_goals', False)),
+        has_nutrient_goals=nutrient_fields['has_nutrient_goals'],
         took_all_meds=bool(features.get('took_all_meds', False)),
         med_adherence_7d_avg=features.get('med_adherence_7d_avg'),
         takes_glycemic_lowering_med=bool(features.get('takes_glycemic_lowering_med', False)),
@@ -144,7 +192,9 @@ def create_history_table(spark, history_table: str) -> None:
             opportunity_used STRING,
             character_count INT,
             word_count INT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            last_modified_at TIMESTAMP,
+            overwrite_count INT
         )
         USING DELTA
         PARTITIONED BY (message_date)
@@ -175,7 +225,7 @@ def get_message_history(spark, patient_id: str, history_table: str,
         yesterday = (reference_date - timedelta(days=1)).strftime('%Y-%m-%d')
 
         query = f"""
-        SELECT category, message_date, opportunity_used
+        SELECT category, message_date, positive_actions_used, opportunity_used
         FROM {history_table}
         WHERE patientid = '{patient_id}'
         AND message_date >= '{lookback_date_7d}'
@@ -183,7 +233,8 @@ def get_message_history(spark, patient_id: str, history_table: str,
 
         rows = spark.sql(query).collect()
 
-        # categories_shown_last_6d — only within the 6-day window
+        # categories_shown_last_6d — only within the 6-day window (all appearances,
+        # positive actions AND opportunities, per clinical decision Q2-B).
         history.categories_shown_last_6d = list(set(
             row['category'] for row in rows
             if str(row['message_date']) >= lookback_date_6d
@@ -193,19 +244,26 @@ def get_message_history(spark, patient_id: str, history_table: str,
         keys = set()
         for row in rows:
             if str(row['message_date']) >= lookback_date_6d:
-                opp = row.get('opportunity_used')
+                opp = row['opportunity_used']
                 if opp:
                     keys.add(opp)
         history.keys_shown_last_6d = list(keys)
 
-        # weight_messages_this_week — full 7-day window (requirement: max 2x/week)
+        # weight_messages_this_week — count ONLY goal-progress messages (weight_decreased /
+        # weight_maintained). The simple weight_logged acknowledgment is exempt from the
+        # 2×/week cap (clinical decision Q1-B).
+        WEIGHT_GOAL_PROGRESS_KEYS = {'weight_decreased', 'weight_maintained'}
         history.weight_messages_this_week = sum(
-            1 for row in rows if row['category'] == 'weight'
+            1 for row in rows
+            if row['category'] == 'weight'
+            and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (row['positive_actions_used'] or []))
         )
 
-        # weight_shown_yesterday
+        # weight_shown_yesterday — same filter: only goal-progress messages count.
         history.weight_shown_yesterday = any(
-            row['category'] == 'weight' and str(row['message_date']) == yesterday
+            row['category'] == 'weight'
+            and str(row['message_date']) == yesterday
+            and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (row['positive_actions_used'] or []))
             for row in rows
         )
 
@@ -315,15 +373,17 @@ def write_patient_history(spark, patient_id: str, message_date: str, result: Dic
                     target.opportunity_used      = source.opportunity_used,
                     target.character_count       = source.character_count,
                     target.word_count            = source.word_count,
-                    target.created_at            = current_timestamp()
+                    target.last_modified_at      = current_timestamp(),
+                    target.overwrite_count       = coalesce(target.overwrite_count, 0) + 1
             WHEN NOT MATCHED THEN
                 INSERT (patientid, category, message_date, message_text, rating,
                         rating_description, positive_actions_used, opportunity_used,
-                        character_count, word_count, created_at)
+                        character_count, word_count, created_at, last_modified_at, overwrite_count)
                 VALUES (source.patientid, source.category, source.message_date,
                         source.message_text, source.rating, source.rating_description,
                         source.positive_actions_used, source.opportunity_used,
-                        source.character_count, source.word_count, current_timestamp())
+                        source.character_count, source.word_count,
+                        current_timestamp(), current_timestamp(), 0)
         """)
 
     except Exception as e:

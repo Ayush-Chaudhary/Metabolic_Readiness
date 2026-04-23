@@ -727,7 +727,9 @@ class LogicEngine:
         if category not in history.categories_shown_last_6d:
             base_priority += self.priority_rules['not_shown_6_days']
         
-        # Streak penalty (if excelling for 3+ days, reduce priority)
+        # Streak penalty — if a category has appeared for 3+ consecutive days
+        # (positive action OR opportunity), deprioritize it on day 4+ so the patient
+        # sees variety. Counts all appearances per clinical decision Q2-B.
         streak_days = history.category_streaks.get(category, 0)
         if streak_days >= self.priority_rules['streak_override_days']:
             base_priority -= self.priority_rules['streak_priority_penalty']
@@ -877,7 +879,7 @@ class LogicEngine:
             eligible.append({
                 'key': 'meal_logged',
                 'category': 'food',
-                'data': {'meal_type': user.last_meal_type or 'breakfast'}
+                'data': {'meal_type': user.last_meal_type or 'meal'}
             })
         
         if user.any_nutrient_target_met:
@@ -1011,11 +1013,14 @@ class LogicEngine:
         thresholds_glucose = self.thresholds['glucose'][user.effective_a1c_group.value]
         
         # === WEIGHT OPPORTUNITIES ===
-        # Spec: "If it's been more than 6 days since last weight entry,
-        # gently prompt user to log a weight entry" — no goal requirement.
-        # Priority is raised when days > 6 because the prompt is clinically
-        # relevant (user hasn't logged in over a week).
-        if safe_gt(user.days_since_last_weight, self.thresholds['weight']['log_prompt_days']):
+        # Only prompt weight logging when the user actually has a weight goal
+        # or weight is in their focus areas.  Without a goal/focus, weight
+        # suggestions were flagged as irrelevant by clinical reviewers.
+        _weight_is_focus = (
+            user.has_weight_goal
+            or (user.user_focus and any(f.strip().lower() == 'weight' for f in user.user_focus))
+        )
+        if _weight_is_focus and safe_gt(user.days_since_last_weight, self.thresholds['weight']['log_prompt_days']):
             eligible.append({
                 'key': 'weight_log_prompt',
                 'category': 'weight',
@@ -1095,7 +1100,11 @@ class LogicEngine:
                 })
         
         # === ACTIVITY OPPORTUNITIES ===
-        if safe_lt(user.weekly_active_minutes, self.thresholds['activity']['weekly_target_minutes']):
+        # Only suggest activity when the user has some form of activity
+        # tracking or an exercise program — otherwise we don't know their
+        # actual minutes and the 150-min guideline isn't their personal goal.
+        _has_activity_context = user.has_step_tracker or user.has_exercise_program
+        if _has_activity_context and safe_lt(user.weekly_active_minutes, self.thresholds['activity']['weekly_target_minutes']):
             eligible.append({
                 'key': 'activity_be_active',
                 'category': 'activity',
@@ -1131,14 +1140,14 @@ class LogicEngine:
                 })
                 food_opportunity_added = True
             else:
-                # Logging food and either meeting targets or no targets set —
-                # offer a general healthy eating suggestion per requirements
-                suggestion = self._pick_food_healthy_suggestion(history)
+                # Logging food — encourage continued logging and checking food insights.
+                # Per requirements: area of opportunity should encourage continuation
+                # of food logging today or to go look at food insights, NOT random
+                # dietary tips like portion sizes or whole grains.
                 eligible.append({
-                    'key': suggestion['key'],
+                    'key': 'food_continue_logging',
                     'category': 'food',
-                    'priority': 50,
-                    'text_override': suggestion['template']
+                    'priority': 50
                 })
                 food_opportunity_added = True
         elif safe_eq(user.days_with_meals_7d, 0):
@@ -1161,7 +1170,11 @@ class LogicEngine:
             })
         
         # === SLEEP OPPORTUNITIES ===
-        if safe_gte(user.avg_sleep_hours_7d, self.thresholds['sleep']['hours_target']):
+        # Guard: only use weekly sleep averages when the user logged sleep
+        # yesterday — this is a rough proxy for "actively tracking sleep"
+        # and avoids making weekly claims from sparse / stale data.
+        _has_recent_sleep = user.sleep_duration_hours is not None
+        if _has_recent_sleep and safe_gte(user.avg_sleep_hours_7d, self.thresholds['sleep']['hours_target']):
             if safe_gte(user.avg_sleep_rating_7d, self.thresholds['sleep']['rating_target']):
                 eligible.append({
                     'key': 'sleep_continue',
@@ -1177,7 +1190,7 @@ class LogicEngine:
                     'priority': 65,
                     'text_override': suggestion['template']
                 })
-        elif user.avg_sleep_hours_7d is not None:  # Has data but below target
+        elif _has_recent_sleep and user.avg_sleep_hours_7d is not None:  # Has data but below target
             # Need more sleep — pre-select a specific improvement tip
             suggestion = self._pick_sleep_suggestion(history)
             eligible.append({
@@ -1345,8 +1358,8 @@ class LogicEngine:
                 opp['priority'] = opp.get('priority', 0) + novelty_boost
         
         # Apply streak penalty to opportunities (same as actions).
-        # Requirements: "If user is excelling in one category for 3 days in a row,
-        # prioritize a different category on day 4."
+        # Clinical decision Q2-B: if a category has appeared 3 days in a row for ANY
+        # reason (positive action or opportunity), rotate to something different on day 4.
         for opp in filtered_opportunities:
             category = opp.get('category', '')
             streak_days = history.category_streaks.get(category, 0)
@@ -1573,6 +1586,34 @@ def load_user_context_from_gold(
     
     row = row[0].asDict()
     
+    # Derive weight logged flags from days_since_last_weight
+    days_since = row.get('days_since_last_weight')
+    
+    # Derive nutrient scoring fields from individual *_target_pct columns
+    nutrient_pcts = {}
+    first_met_name = None
+    for name in ['protein', 'carbs', 'fat', 'calories']:
+        pct = row.get(f'{name}_target_pct')
+        has_goal = row.get(f'goal_{name}') is not None and (row.get(f'goal_{name}') or 0) > 0
+        if has_goal:
+            nutrient_pcts[name] = pct
+            if first_met_name is None and pct is not None and 90 <= pct <= 110:
+                first_met_name = name
+    total_nutrient = len(nutrient_pcts)
+
+    # Parse user_focus from comma-separated string
+    raw_focus = row.get('user_focus')
+    user_focus = raw_focus.split(',') if raw_focus else None
+
+    # Map A1C target group string to enum
+    a1c_mapping = {
+        'dm_target_7': A1CTargetGroup.DM_TARGET_7,
+        'dm_target_8': A1CTargetGroup.DM_TARGET_8,
+        'dip': A1CTargetGroup.DIP,
+        'non_dm': A1CTargetGroup.NON_DM,
+    }
+    a1c_group = a1c_mapping.get(row.get('a1c_target_group'))
+    
     # Map Gold table columns to UserContext
     return UserContext(
         patient_id=patient_id,
@@ -1583,6 +1624,11 @@ def load_user_context_from_gold(
         has_medications=bool((row.get('active_prescription_count') or 0) > 0),
         has_weight_goal=bool(row.get('has_weight_goal', False)),
         weight_goal_type=row.get('weight_goal_type'),
+        has_active_journey=bool(row.get('has_active_journey', False)),
+        has_exercise_program=bool(row.get('has_active_exercise_program', False)),
+        user_focus=user_focus,
+        a1c_target_group=a1c_group,
+        med_reminders_enabled=bool(row.get('med_reminders_enabled', False)),
         
         tir_pct=row.get('tir_pct'),
         tir_prev_day=row.get('tir_pct_delta_1d'),
@@ -1597,22 +1643,65 @@ def load_user_context_from_gold(
         weekly_active_minutes=row.get('active_minutes_7d_sum'),
         
         sleep_duration_hours=row.get('sleep_duration_hours'),
+        prev_day_sleep_hours=row.get('sleep_duration_hours_delta_1d'),
         sleep_rating=row.get('sleep_rating'),
+        prev_day_sleep_rating=row.get('sleep_rating_delta_1d'),
         avg_sleep_hours_7d=row.get('sleep_duration_hours_avg_7d'),
         avg_sleep_rating_7d=row.get('sleep_rating_avg_7d'),
         
         weight_logged_yesterday=bool(row.get('weight_logged_today', False)),
         weight_change_pct=row.get('weight_change_pct'),
-        days_since_last_weight=row.get('days_since_last_weight'),
+        days_since_last_weight=days_since,
+        weight_last_logged_7d=days_since is not None and days_since <= 7,
+        weight_last_logged_14d=days_since is not None and days_since <= 14,
+        weight_last_logged_30d=days_since is not None and days_since <= 30,
+        is_within_maintenance_range=bool(row.get('is_within_maintenance_range', False)),
         
         meals_logged_count=row.get('unique_meals_logged'),
+        last_meal_type=row.get('last_meal_type'),
         any_nutrient_target_met=bool(row.get('any_nutrient_target_met', False)),
+        has_nutrient_goals=total_nutrient > 0,
+        total_nutrient_targets=total_nutrient,
+        num_nutrient_targets_90_110=sum(1 for p in nutrient_pcts.values() if p is not None and 90 <= p <= 110),
+        num_nutrient_targets_60_plus=sum(1 for p in nutrient_pcts.values() if p is not None and p >= 60),
+        num_nutrient_targets_30_plus=sum(1 for p in nutrient_pcts.values() if p is not None and p >= 30),
+        nutrient_name_met=first_met_name,
         days_with_meals_7d=row.get('days_with_meals_7d'),
         
         took_all_meds=bool(row.get('took_all_meds', False)),
         med_adherence_7d_avg=row.get('med_adherence_7d_avg'),
         takes_glycemic_lowering_med=bool(row.get('takes_glycemic_lowering_med', False)),
         glycemic_med_adherent=bool(row.get('glycemic_med_adherent', False)),
+        
+        meditation_opened_30d=bool(row.get('meditation_opened_30d', False)),
+        journal_entry_30d=bool(row.get('journal_entry_30d', False)),
+        action_plan_progress_30d=bool(row.get('action_plan_progress_30d', False)),
+        action_plan_active=bool(row.get('action_plan_active', False)),
+        journal_entry_7d=bool(row.get('journal_entry_7d', False)),
+        meditation_opened_7d=bool(row.get('meditation_opened_7d', False)),
+        
+        journey_task_completed=bool(row.get('journey_task_completed', False)),
+        has_completed_journey=bool(row.get('has_completed_journey', False)),
+        active_journey_count=row.get('active_journey_count', 0) or 0,
+        completed_journey_count=row.get('completed_journey_count', 0) or 0,
+        
+        exercise_video_completed_today=bool(row.get('exercise_video_completed_today', False)),
+        exercise_video_completed_7d=bool(row.get('exercise_video_completed_7d', False)),
+        has_exercise_video_activity=bool(row.get('has_exercise_video_activity', False)),
+        has_completed_video_ever=bool(row.get('has_completed_video_ever', False)),
+        total_videos_completed=row.get('total_videos_completed', 0) or 0,
+        
+        has_active_exercise_program=bool(row.get('has_active_exercise_program', False)),
+        has_completed_exercise_program=bool(row.get('has_completed_exercise_program', False)),
+        exercise_program_started_today=bool(row.get('exercise_program_started_today', False)),
+        exercise_program_completed_today=bool(row.get('exercise_program_completed_today', False)),
+        exercise_program_progress_today=bool(row.get('exercise_program_progress_today', False)),
+        exercise_program_progress_7d=bool(row.get('exercise_program_progress_7d', False)),
+        active_program_count=row.get('active_program_count', 0) or 0,
+        
+        bonus_exercise_video_completed=bool(row.get('exercise_video_completed_today', False)),
+        bonus_exercise_program_started=bool(row.get('exercise_program_started_today', False)),
+        bonus_grocery_online=bool(row.get('grocery_shopped_today', False)),
         
         eligible_positive_actions=row.get('eligible_positive_actions', []),
         eligible_opportunities=row.get('eligible_opportunities', [])
@@ -1644,11 +1733,13 @@ def load_message_history(
     lookback_6d = (datetime.now() - timedelta(days=6)).strftime('%Y-%m-%d')
     yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     
-    # Query message history — include opportunity_used for key-level tracking
+    # Query message history — include positive_actions_used + opportunity_used for
+    # key-level tracking and goal-progress weight cap (clinical decision Q1-B).
     query = f"""
     SELECT 
         category,
         message_date,
+        positive_actions_used,
         opportunity_used
     FROM {history_table}
     WHERE patientid = '{patient_id}'
@@ -1662,7 +1753,8 @@ def load_message_history(
         # Table might not exist yet
         return MessageHistory(patient_id=patient_id)
     
-    # categories_shown_last_6d — within 6-day window only
+    # categories_shown_last_6d — within 6-day window only (all appearances,
+    # positive actions AND opportunities, per clinical decision Q2-B).
     categories_shown = list(set(
         row['category'] for row in rows
         if str(row['message_date']) >= lookback_6d
@@ -1674,12 +1766,20 @@ def load_message_history(
         if str(row['message_date']) >= lookback_6d and row.get('opportunity_used')
     ))
     
-    # Count weight messages this week (full 7-day window)
-    weight_count = sum(1 for row in rows if row['category'] == 'weight')
+    # Count ONLY goal-progress weight messages toward the 2×/week cap.
+    # weight_logged (simple acknowledgment) is exempt (clinical decision Q1-B).
+    WEIGHT_GOAL_PROGRESS_KEYS = {'weight_decreased', 'weight_maintained'}
+    weight_count = sum(
+        1 for row in rows
+        if row['category'] == 'weight'
+        and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (row.get('positive_actions_used') or []))
+    )
     
-    # Check if weight was shown yesterday
+    # weight_shown_yesterday — same filter: only goal-progress messages count.
     weight_yesterday = any(
-        row['category'] == 'weight' and str(row['message_date']) == yesterday
+        row['category'] == 'weight'
+        and str(row['message_date']) == yesterday
+        and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (row.get('positive_actions_used') or []))
         for row in rows
     )
     

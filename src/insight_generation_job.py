@@ -26,15 +26,16 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 # ===== WIDGETS =====
-dbutils.widgets.text("gold_catalog",         "bronz_als_azuat2",                                              "Gold Catalog")
-dbutils.widgets.text("gold_schema",          "llm",                                                           "Gold Schema")
-dbutils.widgets.text("gold_table_name",      "user_daily_health_habits",                                      "Gold Table Name")
-dbutils.widgets.text("output_catalog",       "bronz_als_azuat2",                                              "Output Catalog")
-dbutils.widgets.text("output_schema",        "llm",                                                           "Output Schema")
-dbutils.widgets.text("output_table_name",    "simon_healthy_habits_insights",                                 "Output Table Name")
+dbutils.widgets.text("gold_catalog",         "bronz_als_azuat2",                       "Gold Catalog")
+dbutils.widgets.text("gold_schema",          "llm",                                    "Gold Schema")
+dbutils.widgets.text("gold_table_name",      "user_daily_health_habits",               "Gold Table Name")
+dbutils.widgets.text("output_catalog",       "bronz_als_azuat2",                       "Output Catalog")
+dbutils.widgets.text("output_schema",        "llm",                                    "Output Schema")
+dbutils.widgets.text("output_table_name",    "simon_healthy_habits_insights",          "Output Table Name")
+dbutils.widgets.text("insight_date",         "",                                       "Insight Date (YYYY-MM-DD, blank=today)")
 dbutils.widgets.text("src_path",             "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src", "Source Path")
-dbutils.widgets.text("llm_endpoint",         "databricks-meta-llama-3-3-70b-instruct",                        "LLM Endpoint Name")
-dbutils.widgets.text("insight_date",         "",                                                               "Insight Date (YYYY-MM-DD, blank=today)")
+dbutils.widgets.text("llm_endpoint",         "llama-3-3-70b",                                             "LLM Endpoint Name")
+dbutils.widgets.text("patient_ids",          "",                                                                                  "Patient IDs (comma-separated, blank=all)")
 
 _gold_catalog       = dbutils.widgets.get("gold_catalog")
 _gold_schema        = dbutils.widgets.get("gold_schema")
@@ -42,9 +43,10 @@ _gold_table_name    = dbutils.widgets.get("gold_table_name")
 _output_catalog     = dbutils.widgets.get("output_catalog")
 _output_schema      = dbutils.widgets.get("output_schema")
 _output_table_name  = dbutils.widgets.get("output_table_name")
+_insight_date_raw   = dbutils.widgets.get("insight_date").strip()
 _src_path           = dbutils.widgets.get("src_path")
 _llm_endpoint       = dbutils.widgets.get("llm_endpoint")
-_insight_date_raw   = dbutils.widgets.get("insight_date").strip()
+_patient_ids_raw    = dbutils.widgets.get("patient_ids").strip()
 
 # COMMAND ----------
 
@@ -59,19 +61,6 @@ import sys
 logging.getLogger("py4j").setLevel(logging.WARNING)
 
 _src_dir = _src_path or os.path.dirname(os.path.abspath(__file__))
-
-# ===== RESOLVE INSIGHT DATE =====
-# Defaults to today when the widget is left blank; otherwise parse the user-supplied date.
-if _insight_date_raw:
-    _insight_date = datetime.strptime(_insight_date_raw, "%Y-%m-%d")
-else:
-    _insight_date = datetime.now()
-
-insight_date_str = _insight_date.strftime("%Y-%m-%d")
-feature_date     = _insight_date - timedelta(days=1)
-feature_date_str = feature_date.strftime("%Y-%m-%d")
-
-print(f"Insight date : {insight_date_str}  (feature date / yesterday: {feature_date_str})")
 
 # ===== JOB CONFIGURATION =====
 JOB_CONFIG: Dict[str, Any] = {
@@ -96,7 +85,7 @@ JOB_CONFIG: Dict[str, Any] = {
         "table_name": _output_table_name,
     },
 
-    # Prompts / config file — resolved relative to this notebook's directory
+    # Prompts / config file — resolved relative to src_path widget
     "prompts_config_path": os.path.join(_src_dir, "prompts.yml"),
 
     # Code directory (where logic_engine.py and insight_generator.py live)
@@ -136,6 +125,49 @@ from pipeline_utils import (
     _extract_categories_from_actions,
 )
 
+def _build_weekly_context(user: UserContext, opportunity: dict) -> str:
+    """Build weekly-context string when 7-day trends influenced the opportunity."""
+    lines = []
+    opp_key = opportunity.get('key', '')
+    opp_category = opportunity.get('category', '')
+
+    if opp_category == 'sleep' or opp_key.startswith('sleep_'):
+        if (user.sleep_duration_hours is not None
+                and user.avg_sleep_hours_7d is not None
+                and user.sleep_duration_hours >= 7
+                and user.avg_sleep_hours_7d < 7):
+            lines.append(
+                f"- Yesterday's sleep: {user.sleep_duration_hours:.1f}h. "
+                f"7-day average: {user.avg_sleep_hours_7d:.1f}h (below 7h target)."
+            )
+        if (user.sleep_rating is not None
+                and user.avg_sleep_rating_7d is not None
+                and user.sleep_rating >= 7
+                and user.avg_sleep_rating_7d < 7):
+            lines.append(
+                f"- Yesterday's sleep rating: {int(user.sleep_rating)}/10. "
+                f"7-day average rating: {user.avg_sleep_rating_7d:.1f}/10 (below 7 target)."
+            )
+
+    if opp_category == 'activity' or opp_key.startswith('activity_'):
+        if (user.active_minutes is not None
+                and user.weekly_active_minutes is not None
+                and user.active_minutes >= 20
+                and user.weekly_active_minutes < 150):
+            lines.append(
+                f"- Yesterday's active minutes: {int(user.active_minutes)}. "
+                f"Weekly total is below the recommended level. Encourage more activity today."
+            )
+
+    if opp_key == 'medication_reminders':
+        if user.med_adherence_7d_avg is not None and user.took_all_meds:
+            lines.append(
+                f"- Yesterday: took all meds. "
+                f"7-day adherence average: {user.med_adherence_7d_avg:.0%} (below 50% threshold)."
+            )
+
+    return "\n".join(lines)
+
 print("✓ Modules imported")
 
 # COMMAND ----------
@@ -167,11 +199,14 @@ print(f"✓ LLM endpoint: {insight_generator.model_config['endpoint_name']}")
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
-    patient_id   STRING    NOT NULL  COMMENT 'Unique patient identifier',
-    insight_date DATE      NOT NULL  COMMENT 'Date the insight was generated for (yesterday data)',
-    insight      STRING              COMMENT 'Full personalised health message (~250 words)',
-    score_name   STRING              COMMENT 'Daily health rating: Committed | Strong | Consistent | Building | Ready',
-    generated_at TIMESTAMP           COMMENT 'Timestamp when this row was written'
+    patient_id       STRING    NOT NULL  COMMENT 'Unique patient identifier',
+    insight_date     DATE      NOT NULL  COMMENT 'Date the insight was generated for (yesterday data)',
+    insight          STRING              COMMENT 'Full personalised health message (~250 words)',
+    score_name       STRING              COMMENT 'Daily health rating: Committed | Strong | Consistent | Building | Ready',
+    generated_at     TIMESTAMP           COMMENT 'Timestamp of the most recent write to this row',
+    created_at       TIMESTAMP           COMMENT 'Timestamp when this row was first inserted. Preserved across re-runs.',
+    last_modified_at TIMESTAMP           COMMENT 'Timestamp of the most recent overwrite of this row (equals created_at on first run).',
+    overwrite_count  INT                 COMMENT 'Number of times this (patient_id, insight_date) row has been recomputed. 0 = original write.'
 )
 USING DELTA
 COMMENT 'One row per patient per day. Written by the SIMON Health Habits batch job (Notebook 2).'
@@ -182,24 +217,56 @@ TBLPROPERTIES (
 
 print(f"✓ Output table ready: {OUTPUT_TABLE}")
 
-# COMMAND ----------
-# MAGIC %md
-# MAGIC ## 5b. Create History Table (if it does not exist)
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} (
+    patientid              STRING    NOT NULL  COMMENT 'Unique patient identifier',
+    category               STRING    NOT NULL  COMMENT 'Message category (e.g. glucose, sleep, weight, food, medications, mental_wellbeing, journey, explore)',
+    message_date           DATE      NOT NULL  COMMENT 'Date the message was generated',
+    message_text           STRING              COMMENT 'Full generated insight text',
+    rating                 STRING              COMMENT 'Daily health rating (e.g. Strong)',
+    rating_description     STRING              COMMENT 'Rating description shown to the patient',
+    positive_actions_used  ARRAY<STRING>       COMMENT 'Action keys used in this message',
+    opportunity_used       STRING              COMMENT 'Opportunity key used in this message',
+    character_count        INT                 COMMENT 'Character count of generated message',
+    word_count             INT                 COMMENT 'Word count of generated message',
+    created_at             TIMESTAMP           COMMENT 'Timestamp when this row was written'
+)
+USING DELTA
+COMMENT 'Message history for frequency capping and variety tracking. One row per patient x category x date.'
+TBLPROPERTIES (
+    'delta.enableChangeDataFeed' = 'true'
+)
+""")
 
-# COMMAND ----------
+# Backfill columns that may be absent if the table was created with an older schema
+for _col_sql in [
+    f"ALTER TABLE {HISTORY_TABLE} ADD COLUMNS (rating_description STRING COMMENT 'Rating description shown to the patient')",
+    f"ALTER TABLE {HISTORY_TABLE} ADD COLUMNS (character_count INT COMMENT 'Character count of generated message')",
+    f"ALTER TABLE {HISTORY_TABLE} ADD COLUMNS (word_count INT COMMENT 'Word count of generated message')",
+    f"ALTER TABLE {HISTORY_TABLE} ADD COLUMNS (last_modified_at TIMESTAMP COMMENT 'Timestamp of the most recent write to this row')",
+    f"ALTER TABLE {HISTORY_TABLE} ADD COLUMNS (overwrite_count INT COMMENT 'Number of times this row has been recomputed. 0 = original write.')",
+    f"ALTER TABLE {OUTPUT_TABLE} ADD COLUMNS (created_at TIMESTAMP COMMENT 'Timestamp when this row was first inserted')",
+    f"ALTER TABLE {OUTPUT_TABLE} ADD COLUMNS (last_modified_at TIMESTAMP COMMENT 'Timestamp of the most recent overwrite of this row')",
+    f"ALTER TABLE {OUTPUT_TABLE} ADD COLUMNS (overwrite_count INT COMMENT 'Number of times this row has been recomputed. 0 = original write.')",
+]:
+    try:
+        spark.sql(_col_sql)
+    except Exception:
+        pass  # column already exists — safe to ignore
 
-_history_exists = spark.catalog.tableExists(HISTORY_TABLE)
-
-if not _history_exists:
-    create_history_table(spark, HISTORY_TABLE)
-else:
-    print(f"✓ History table already exists: {HISTORY_TABLE}")
+print(f"✓ History table ready: {HISTORY_TABLE}")
 
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## 6. Fetch All Patients with Features for Today
 
 # COMMAND ----------
+
+# insight_date  = the date the generated insight belongs to (widget or today)
+# feature_date  = the date the feature store was computed for (insight_date - 1 day)
+_insight_date    = datetime.strptime(_insight_date_raw, "%Y-%m-%d") if _insight_date_raw else datetime.now()
+insight_date_str = _insight_date.strftime("%Y-%m-%d")
+feature_date_str = (_insight_date - timedelta(days=1)).strftime("%Y-%m-%d")
 
 patients_df = spark.sql(f"""
     SELECT DISTINCT patientid
@@ -208,6 +275,13 @@ patients_df = spark.sql(f"""
 """)
 
 patient_ids: List[str] = [row["patientid"] for row in patients_df.collect()]
+
+# If a comma-separated list of patient IDs was provided via widget, restrict to those only.
+if _patient_ids_raw:
+    _filter_set = {pid.strip() for pid in _patient_ids_raw.split(",") if pid.strip()}
+    patient_ids = [pid for pid in patient_ids if str(pid) in _filter_set]
+    print(f"  ↳ Filtered to {len(patient_ids)} patient(s) from widget")
+
 total_patients = len(patient_ids)
 print(f"✓ Found {total_patients} patients with feature data for {feature_date_str} (generating insights for {insight_date_str})")
 
@@ -223,8 +297,8 @@ from collections import defaultdict
 
 MAX_WORKERS = 10   # concurrent LLM threads; tune based on endpoint rate limits
 
-results      = []
-failed       = []
+results       = []
+failed        = []
 history_batch = []  # accumulate for a single batch MERGE at the end
 
 # ----------------------------------------------------------
@@ -247,7 +321,7 @@ print(f"  ✓ Loaded features for {len(features_map)} patients")
 print("Pre-fetching message history…")
 lookback_date_7d = (_insight_date - timedelta(days=7)).strftime('%Y-%m-%d')
 lookback_date_6d = (_insight_date - timedelta(days=6)).strftime('%Y-%m-%d')
-yesterday_str = (_insight_date - timedelta(days=1)).strftime('%Y-%m-%d')
+yesterday_str    = (_insight_date - timedelta(days=1)).strftime('%Y-%m-%d')
 
 spark.createDataFrame(
     [(pid,) for pid in patient_ids],
@@ -257,12 +331,13 @@ spark.createDataFrame(
 history_rows_by_patient: Dict[str, list] = defaultdict(list)
 try:
     for row in spark.sql(f"""
-        SELECT h.patientid, h.category, h.message_date, h.opportunity_used
+        SELECT h.patientid, h.category, h.message_date,
+               h.positive_actions_used, h.opportunity_used
         FROM   {HISTORY_TABLE} h
         JOIN   tmp_active_patient_ids p ON h.patientid = p.patientid
         WHERE  h.message_date >= '{lookback_date_7d}'
     """).collect():
-        history_rows_by_patient[row["patientid"]].append(row)
+        history_rows_by_patient[row["patientid"]].append(row.asDict())
 except Exception as e:
     print(f"  Warning: could not pre-fetch history ({e}) — proceeding with empty history")
 
@@ -271,36 +346,44 @@ print(f"  ✓ History pre-fetched")
 # ----------------------------------------------------------
 # Helper: build MessageHistory from pre-fetched rows (no Spark call)
 # ----------------------------------------------------------
+WEIGHT_GOAL_PROGRESS_KEYS = {'weight_decreased', 'weight_maintained'}
+
 def _build_history_from_cache(patient_id: str) -> MessageHistory:
-    rows = history_rows_by_patient.get(patient_id, [])
+    rows = history_rows_by_patient.get(str(patient_id), [])
     history = MessageHistory(patient_id=patient_id)
 
-    # categories_shown_last_6d — only within the 6-day window
+    # categories_shown_last_6d — all appearances within 6-day window
     history.categories_shown_last_6d = list(set(
         r["category"] for r in rows
         if str(r["message_date"]) >= lookback_date_6d
     ))
 
-    # keys_shown_last_6d — specific opportunity keys within 6-day window
+    # keys_shown_last_6d — opportunity keys within 6-day window
     keys = set()
     for r in rows:
         if str(r["message_date"]) >= lookback_date_6d:
-            opp = r.get("opportunity_used")
+            opp = r.get("opportunity_used") or r.get("opportunity_used")
             if opp:
                 keys.add(opp)
     history.keys_shown_last_6d = list(keys)
 
-    # weight_messages_this_week — full 7-day window (requirement: max 2x/week)
-    history.weight_messages_this_week = sum(1 for r in rows if r["category"] == "weight")
+    # weight_messages_this_week — only goal-progress messages (Q1-B)
+    history.weight_messages_this_week = sum(
+        1 for r in rows
+        if r["category"] == "weight"
+        and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (r.get("positive_actions_used") or []))
+    )
 
-    # weight_shown_yesterday
+    # weight_shown_yesterday — same goal-progress filter
     history.weight_shown_yesterday = any(
-        r["category"] == "weight" and str(r["message_date"]) == yesterday_str
+        r["category"] == "weight"
+        and str(r["message_date"]) == yesterday_str
+        and any(k in WEIGHT_GOAL_PROGRESS_KEYS for k in (r.get("positive_actions_used") or []))
         for r in rows
     )
 
     # category_streaks — consecutive days ending at yesterday
-    category_dates = defaultdict(set)
+    category_dates: Dict[str, set] = defaultdict(set)
     for r in rows:
         category_dates[r["category"]].add(str(r["message_date"]))
 
@@ -331,12 +414,16 @@ def process_patient(patient_id: str):
     history  = _build_history_from_cache(patient_id)
     selected: SelectedContent = logic_engine.select_content(context, history)
 
+    # Build weekly context for LLM
+    weekly_context = _build_weekly_context(context, selected.opportunity)
+
     gen = insight_generator.generate_insight(
         daily_rating       = selected.daily_rating,
         rating_description = selected.rating_description,
         positive_actions   = selected.positive_actions,
         opportunity        = selected.opportunity,
         greeting           = selected.greeting,
+        weekly_context     = weekly_context,
     )
 
     if not gen["success"]:
@@ -411,7 +498,7 @@ if history_batch:
         categories  = _extract_categories_from_actions(action_keys + ([opp_key] if opp_key else []))
         for category in categories:
             history_rows.append({
-                "patientid"            : result["patient_id"],
+                "patientid"            : str(result["patient_id"]),
                 "category"             : category,
                 "message_date"         : result["insight_date"],
                 "message_text"         : result["insight"],
@@ -423,34 +510,39 @@ if history_batch:
                 "word_count"           : result.get("word_count", 0),
             })
 
-    spark.createDataFrame(history_rows, schema=history_schema).createOrReplaceTempView("tmp_history_batch")
+    if history_rows:
+        spark.createDataFrame(history_rows, schema=history_schema).createOrReplaceTempView("tmp_history_batch")
 
-    spark.sql(f"""
-        MERGE INTO {HISTORY_TABLE} AS target
-        USING tmp_history_batch AS source
-            ON  target.patientid    = source.patientid
-            AND target.category     = source.category
-            AND target.message_date = source.message_date
-        WHEN MATCHED THEN
-            UPDATE SET
-                target.message_text          = source.message_text,
-                target.rating                = source.rating,
-                target.rating_description    = source.rating_description,
-                target.positive_actions_used = source.positive_actions_used,
-                target.opportunity_used      = source.opportunity_used,
-                target.character_count       = source.character_count,
-                target.word_count            = source.word_count,
-                target.created_at            = current_timestamp()
-        WHEN NOT MATCHED THEN
-            INSERT (patientid, category, message_date, message_text, rating,
-                    rating_description, positive_actions_used, opportunity_used,
-                    character_count, word_count, created_at)
-            VALUES (source.patientid, source.category, source.message_date,
-                    source.message_text, source.rating, source.rating_description,
-                    source.positive_actions_used, source.opportunity_used,
-                    source.character_count, source.word_count, current_timestamp())
-    """)
-    print(f"  ✓ Upserted {len(history_rows)} history rows in one batch MERGE")
+        spark.sql(f"""
+            MERGE INTO {HISTORY_TABLE} AS target
+            USING tmp_history_batch AS source
+                ON  target.patientid    = source.patientid
+                AND target.category     = source.category
+                AND target.message_date = source.message_date
+            WHEN MATCHED THEN
+                UPDATE SET
+                    target.message_text          = source.message_text,
+                    target.rating                = source.rating,
+                    target.rating_description    = source.rating_description,
+                    target.positive_actions_used = source.positive_actions_used,
+                    target.opportunity_used      = source.opportunity_used,
+                    target.character_count       = source.character_count,
+                    target.word_count            = source.word_count,
+                    target.last_modified_at      = current_timestamp(),
+                    target.overwrite_count       = coalesce(target.overwrite_count, 0) + 1
+            WHEN NOT MATCHED THEN
+                INSERT (patientid, category, message_date, message_text, rating,
+                        rating_description, positive_actions_used, opportunity_used,
+                        character_count, word_count, created_at, last_modified_at, overwrite_count)
+                VALUES (source.patientid, source.category, source.message_date,
+                        source.message_text, source.rating, source.rating_description,
+                        source.positive_actions_used, source.opportunity_used,
+                        source.character_count, source.word_count,
+                        current_timestamp(), current_timestamp(), 0)
+        """)
+        print(f"  ✓ Upserted {len(history_rows)} history rows in one batch MERGE")
+    else:
+        print("  No categories extracted — nothing written to history")
 else:
     print("  No history rows to write")
 
@@ -461,28 +553,21 @@ else:
 # COMMAND ----------
 
 if results:
-    from pyspark.sql.types import StructType, StructField, StringType
-
-    output_schema = StructType([
-        StructField("patient_id",   StringType(), True),
-        StructField("insight_date", StringType(), True),
-        StructField("insight",      StringType(), True),
-        StructField("score_name",   StringType(), True),
-        StructField("generated_at", StringType(), True),
-    ])
+    from pyspark.sql import Row
+    from pyspark.sql.functions import lit, current_timestamp
 
     output_rows = [
-        {
-            "patient_id"  : r["patient_id"],
-            "insight_date": r["insight_date"],
-            "insight"     : r["insight"],
-            "score_name"  : r["score_name"],
-            "generated_at": r["generated_at"],
-        }
+        Row(
+            patient_id   = r["patient_id"],
+            insight_date = r["insight_date"],
+            insight      = r["insight"],
+            score_name   = r["score_name"],
+            generated_at = r["generated_at"],
+        )
         for r in results
     ]
 
-    result_df = spark.createDataFrame(output_rows, schema=output_schema)
+    result_df = spark.createDataFrame(output_rows)
 
     # Write to a temporary view so we can MERGE from it
     temp_view = "tmp_insights_batch"
@@ -495,12 +580,16 @@ if results:
             AND target.insight_date = source.insight_date
         WHEN MATCHED THEN
             UPDATE SET
-                target.insight      = source.insight,
-                target.score_name   = source.score_name,
-                target.generated_at = source.generated_at
+                target.insight          = source.insight,
+                target.score_name       = source.score_name,
+                target.generated_at     = source.generated_at,
+                target.last_modified_at = current_timestamp(),
+                target.overwrite_count  = coalesce(target.overwrite_count, 0) + 1
         WHEN NOT MATCHED THEN
-            INSERT (patient_id, insight_date, insight, score_name, generated_at)
-            VALUES (source.patient_id, source.insight_date, source.insight, source.score_name, source.generated_at)
+            INSERT (patient_id, insight_date, insight, score_name, generated_at,
+                    created_at, last_modified_at, overwrite_count)
+            VALUES (source.patient_id, source.insight_date, source.insight, source.score_name, source.generated_at,
+                    current_timestamp(), current_timestamp(), 0)
     """)
 
     print(f"✓ Upserted {len(results)} rows into {OUTPUT_TABLE}")

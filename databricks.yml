@@ -1,0 +1,143 @@
+# Databricks Asset Bundle — SimonsHealthyHabits
+# Deploys the daily Health Habits feature-store pipeline and insight generation.
+#
+# Deploy to dev:   databricks bundle deploy
+# Deploy to prod:  databricks bundle deploy --target prod
+# Run manually:    databricks bundle run run_simon_healthy_habits --target prod
+
+bundle:
+  name: SimonHealthyHabits
+
+# ── Variables ────────────────────────────────────────────────────────────────
+# Defaults are dev values. Prod target overrides where noted.
+variables:
+  source_catalog:
+    default: bronz_als_prod
+    description: "Source catalog for raw Bronze/Silver health data"
+
+  gold_catalog:
+    default: bronz_als_azuat2
+    description: "Catalog where the Gold feature store table is written (Notebook 1 output / Notebook 2 input)"
+
+  gold_schema:
+    default: llm
+    description: "Schema within the gold catalog for the feature store table"
+
+  gold_table_name:
+    default: user_daily_health_habits
+    description: "Delta table name for the Gold feature store written by Notebook 1"
+
+  output_catalog:
+    default: bronz_als_azuat2
+    description: "Catalog where the insights output table is written (Notebook 2 output)"
+
+  output_schema:
+    default: llm
+    description: "Schema within the output catalog for the insights table"
+
+  output_table_name:
+    default: simon_healthy_habits_insights
+    description: "Delta table name for the per-patient insight rows written by Notebook 2"
+
+  src_path:
+    default: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src
+    description: "Absolute workspace path to the src/ directory (used by insight_generation_job to import sibling modules)"
+
+  llm_endpoint:
+    default: databricks-meta-llama-3-3-70b-instruct
+    description: "Databricks serving endpoint name for the LLM (Meta Llama 3.3 70B)"
+
+  cluster_id:
+    default: "0220-155354-j83f24u8"
+    description: "ID of the existing cluster used for both tasks (dev: wd-az-nonprod-dataingestion-welldoc)"
+
+# ── Resources ────────────────────────────────────────────────────────────────
+resources:
+  jobs:
+
+    # ── Main daily pipeline ───────────────────────────────────────────────────
+    run_simon_healthy_habits:
+      name: Simon_Healthy_Habits_ALS
+      description: >-
+        Daily Health Habits pipeline (2 tasks).
+        Task 1: builds the Gold feature store from Bronze/Silver sources.
+        Task 2: runs the logic engine + LLM and writes one insight row per
+        active patient to the output table.
+        Schedule is paused by default; prod target overrides to UNPAUSED.
+
+      schedule:
+        quartz_cron_expression: "0 0 1 * * ?"   # 01:00 America/New_York daily
+        timezone_id: America/New_York
+        pause_status: PAUSED
+
+      tasks:
+        # ── Task 1: Feature Store Creation ────────────────────────────────────
+        - task_key: feature_store_creation
+          existing_cluster_id: "${var.cluster_id}"
+          notebook_task:
+            notebook_path: ./Feature_store_Creation/notebook.py
+            base_parameters:
+              source_catalog:  "${var.source_catalog}"
+              gold_catalog:    "${var.gold_catalog}"
+              gold_schema:     "${var.gold_schema}"
+              gold_table_name: "${var.gold_table_name}"
+
+        # ── Task 2: Insight Generation ────────────────────────────────────────
+        - task_key: insight_generation
+          depends_on:
+            - task_key: feature_store_creation
+          existing_cluster_id: "${var.cluster_id}"
+          notebook_task:
+            notebook_path: ./src/insight_generation_job.py
+            base_parameters:
+              gold_catalog:      "${var.gold_catalog}"
+              gold_schema:       "${var.gold_schema}"
+              gold_table_name:   "${var.gold_table_name}"
+              output_catalog:    "${var.output_catalog}"
+              output_schema:     "${var.output_schema}"
+              output_table_name: "${var.output_table_name}"
+              src_path:          "${var.src_path}"
+              llm_endpoint:      "${var.llm_endpoint}"
+
+# ── Targets ───────────────────────────────────────────────────────────────────
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-2008955168844352.12.azuredatabricks.net
+      root_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+    variables:
+      source_catalog:   bronz_als_prod
+      gold_catalog:     bronz_als_azuat2
+      gold_schema:      llm
+      gold_table_name:  user_daily_health_habits
+      output_catalog:   bronz_als_azuat2
+      output_schema:    llm
+      output_table_name: simon_healthy_habits_insights
+      src_path:         /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src
+      cluster_id:       "0220-155354-j83f24u8"
+
+  prod:
+    mode: production
+    run_as:
+      service_principal_name: cea2bdb7-d7cc-450d-a0bc-6a841b2392a8
+    workspace:
+      host: https://adb-1566239228506032.12.azuredatabricks.net
+      root_path: /Workspace/Repos/ALS_Machine_Learning/SimonHealthyHabits
+    variables:
+      source_catalog:   bronz_als_prod
+      gold_catalog:     bronz_als_prod_inference
+      gold_schema:      simon_healthy_habits
+      gold_table_name:  user_daily_health_habits
+      output_catalog:   bronz_als_prod_inference
+      output_schema:    simon_healthy_habits
+      output_table_name: simon_healthy_habits_insights
+      src_path:         /Workspace/Repos/ALS_Machine_Learning/SimonHealthyHabits/files/src
+      cluster_id:       "1125-223321-0se8kdpe"
+      llm_endpoint:     databricks-meta-llama-3-3-70b-instruct
+    resources:
+      jobs:
+        run_simon_healthy_habits:
+          schedule:
+            pause_status: UNPAUSED

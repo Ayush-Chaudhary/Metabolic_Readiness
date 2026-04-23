@@ -159,7 +159,7 @@ base priority
 + Medication boost — **currently disabled** (set to 0; was +70, removed based on clinical review)
 + Focus area boost (if action's category matches one of the patient's active focuses)
 + "Not seen in 6 days" boost (variety — surface things the patient hasn't seen recently)
-− Streak penalty (if patient is already excelling in this category 3 days in a row, deprioritize it)
+− Streak penalty (if this category has appeared 3 days in a row — positive action OR opportunity — deprioritize it so the patient sees variety)
 ```
 
 The focus area boost uses a **weighted** system — currently **uniform** (all active focuses count equally). When the patient matches any active focus, they get the full +60 point focus boost. This design makes it easy to swap in a different strategy later (e.g., primary focus gets 70%, secondary focus gets 30%).
@@ -177,9 +177,10 @@ After ranking, the engine picks:
 - **Focus filter fallback**: if focus-area filtering eliminates *all* qualifying actions or opportunities, the engine falls back to the unfiltered list so the patient always gets content
 - **1 opportunity** (just the top-ranked one)
 
-**Weight capping rule** is also enforced here:
-- Weight can only appear in the message **2× per week maximum**
-- Weight cannot appear on **back-to-back days**
+**Weight capping rule** is also enforced here — but **only for goal-progress messages** (`weight_decreased` / `weight_maintained`):
+- Goal-progress weight messages can only appear **2× per week maximum**
+- Goal-progress weight messages cannot appear on **back-to-back days**
+- The simple **weight logging acknowledgment** (`weight_logged`) is **exempt** from these caps and can appear any day the patient logs their weight.
 
 This check is done against the `MessageHistory` object, which is loaded from the message history table before the engine runs.
 
@@ -216,7 +217,7 @@ After the AI writes the message, an optional **validation LLM call** (toggleable
 | Anxiety focus maps to Mental Well-being category | ✅ | `FOCUS_CATEGORY_MAP` |
 | Exclude CGM actions without CGM | ✅ | `has_device=user.has_cgm` guard |
 | Exclude steps actions without step tracker | ✅ | `has_device=user.has_step_tracker` guard |
-| Weight shown max 2×/week, never back-to-back | ✅ | `MessageHistory` + `get_eligible_positive_actions()` |
+| Goal-progress weight messages max 2×/week, never back-to-back; `weight_logged` exempt | ✅ | `MessageHistory` + `get_eligible_positive_actions()` |
 | CGM with TIR met target **or improved** → always include | ✅ | `select_content()` CGM block (expanded) |
 | A1C-based glucose thresholds (7%, 8%, DIP, non-DM) | ✅ | `A1CTargetGroup` + `clinical_thresholds` config |
 | Prioritize Journey actions | ✅ | `journey_active` priority boost (+100) |
@@ -225,7 +226,7 @@ After the AI writes the message, an optional **validation LLM call** (toggleable
 | Prioritize medications for patients with meds list | ⏸️ Disabled | `medications_on_list` set to 0 (clinical review) |
 | Prioritize focus-area actions | ✅ | `user_focus_area` boost (+60) |
 | Prioritize actions not shown in last 6 days | ✅ | `not_shown_6_days` boost (+50) |
-| Deprioritize category if excelling 3 days in a row | ✅ | `streak_override_days` penalty (−30) |
+| Deprioritize category if shown (any reason) 3 days in a row | ✅ | `streak_override_days` penalty (−30) |
 | Vary opportunities shown as much as possible | ✅ | Random jitter tiebreaker + streak penalty |
 | Fall back to "browse Explore" if no opportunities | ✅ | `explore_browse` default |
 | Fall back to "kudos for logging in" if no actions | ✅ | `app_login` fallback |

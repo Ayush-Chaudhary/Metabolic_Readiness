@@ -70,6 +70,8 @@ CONFIG: Dict[str, Any] = {
         "med_administration": f"{_source_catalog}.trxdb_dsmbasedb_observation.medadministration",
         "med_prescription": f"{_source_catalog}.trxdb_dsmbasedb_observation.medprescription",
         "med_schedule": f"{_source_catalog}.trxdb_dsmbasedb_observation.medprescriptiondayschedule",
+        "med_class":    f"{_source_catalog}.trxdb_dsmbasedb_observation.medclass",
+        "medication":   f"{_source_catalog}.trxdb_dsmbasedb_observation.medication",
         "patient_nutrition_goals": f"{_source_catalog}.trxdb_dsmbasedb_user.patientgoaldetails",
         "a1c_target": f"{_source_catalog}.trxdb_dsmbasedb_observation.patienttargetsegment",
         "journal": f"{_source_catalog}.trxdb_dsmbasedb_userengagement.userjournal",
@@ -176,6 +178,51 @@ def get_gold_table_path() -> str:
 print("✓ Configuration loaded")
 print(f"Gold table target: {get_gold_table_path()}")
 
+# Start of the 35-day lookback window (+ 1 UTC day to handle timezone edge cases).
+# Every source read should filter records to >= _start_date so Spark can prune
+# Delta files instead of scanning the entire table history.
+_start_date = _feature_date - _td(days=CONFIG["processing"]["lookback_window_days"] + 1)
+print(f"lookback start  : {_start_date}  (window: {CONFIG['processing']['lookback_window_days']} days)")
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## 1b. Source Table Existence Check
+
+# COMMAND ----------
+
+def check_source_tables() -> None:
+    """
+    Verifies that every table listed in CONFIG["source_tables"] exists and is
+    accessible in the requested source catalog.
+
+    Prints a pass/fail line for each table and raises a RuntimeError at the end
+    if any table is missing, so the notebook fails fast before any feature
+    engineering work begins.
+    """
+    missing = []
+    print(f"🔍 Checking source tables in catalog: {_source_catalog}\n")
+
+    for key, full_path in CONFIG["source_tables"].items():
+        try:
+            spark.table(full_path).limit(0).count()
+            print(f"  ✅  {key:30s}  {full_path}")
+        except Exception as e:
+            missing.append((key, full_path, str(e)))
+            print(f"  ❌  {key:30s}  {full_path}")
+            print(f"       └─ {e}")
+
+    print(f"\n{'─' * 70}")
+    if missing:
+        summary = "\n".join(f"  • {k}  →  {p}" for k, p, _ in missing)
+        raise RuntimeError(
+            f"\n{len(missing)} source table(s) not found:\n{summary}\n\n"
+            "Fix the source_catalog widget or grant SELECT on the missing tables."
+        )
+    else:
+        print(f"✓ All {len(CONFIG['source_tables'])} source tables exist and are accessible.")
+
+check_source_tables()
+
 # COMMAND ----------
 # MAGIC %md
 # MAGIC ## 2. Helper Functions - Timezone & Date Utilities
@@ -222,6 +269,15 @@ def filter_active_records(df: DataFrame, status_col: str = "observationstatus") 
     condition = (F.col(status_col).isin(valid_statuses))
     
     return df.filter(condition)
+
+def filter_lookback(df: DataFrame, ts_col: str) -> DataFrame:
+    """
+    Drops source records older than the lookback window before timezone conversion
+    or aggregation.  This allows Spark / Delta to prune files at scan time, which
+    is the primary driver of runtime on large source tables.
+    _start_date already includes a 1-day UTC buffer for timezone edge cases.
+    """
+    return df.filter(F.col(ts_col) >= F.lit(str(_start_date)))
 
 def add_day_over_day_delta(df: DataFrame, 
                            value_col: str,
@@ -326,6 +382,8 @@ def create_glucose_features() -> DataFrame:
                       "externalsourceid"
                   ))
     
+    # Prune to lookback window before any per-row processing
+    glucose_df = filter_lookback(glucose_df, "observationdatetime")
     # Apply timezone and filter
     glucose_df = add_local_date(glucose_df, "observationdatetime")
     glucose_df = filter_active_records(glucose_df)
@@ -396,6 +454,8 @@ def create_activity_features() -> DataFrame:
                        "timezoneoffset"
                    ))
     
+    # Prune to lookback window before any per-row processing
+    activity_df = filter_lookback(activity_df, "observationdatetime")
     # Apply timezone
     activity_df = add_local_date(activity_df, "observationdatetime")
     
@@ -451,6 +511,7 @@ def create_meditation_features() -> DataFrame:
                      .select("patientid", "exercisetype", "observationdatetime", "timezoneoffset")
                      .filter(F.col("exercisetype") == meditation_type))
     
+    meditation_df = filter_lookback(meditation_df, "observationdatetime")
     meditation_df = add_local_date(meditation_df, "observationdatetime")
     
     meditation_daily = meditation_df.groupBy("patientid", "local_date").agg(
@@ -495,6 +556,8 @@ def create_steps_features() -> DataFrame:
                     "observationstatus"
                 ))
     
+    # Prune to lookback window before any per-row processing
+    steps_df = filter_lookback(steps_df, "startdatetime")
     # Apply timezone (use startdatetime for date bucketing)
     steps_df = add_local_date(steps_df, "startdatetime")
     
@@ -562,6 +625,8 @@ def create_weight_features() -> DataFrame:
                      "timezoneoffset"
                  ))
     
+    # Prune to lookback window before any per-row processing
+    weight_df = filter_lookback(weight_df, "observationdatetime")
     # Apply timezone
     weight_df = add_local_date(weight_df, "observationdatetime")
     
@@ -580,11 +645,19 @@ def create_weight_features() -> DataFrame:
                     .filter(F.col("rn") == 1)
                     .drop("rn"))
     
-    # Calculate days since last weight entry
-    window_all = Window.partitionBy("patientid").orderBy(F.col("local_date").desc())
+    # Calculate days since last weight entry.
+    # Use _feature_date (the report date) as the reference — NOT current_date(),
+    # which drifts when the notebook runs after the feature date.  Take the
+    # patient's most recent weight log on or before _feature_date so the
+    # value is the same on every row and survives the Gold-table date filter.
     weight_daily = weight_daily.withColumn(
         "days_since_last_weight",
-        F.datediff(F.current_date(), F.col("local_date"))
+        F.datediff(
+            F.lit(str(_feature_date)),
+            F.max(
+                F.when(F.col("local_date") <= F.lit(str(_feature_date)), F.col("local_date"))
+            ).over(Window.partitionBy("patientid"))
+        )
     )
     
     # Add weight change from previous entry
@@ -600,6 +673,36 @@ def create_weight_features() -> DataFrame:
             (F.col("weight_lbs_delta") / F.lag("weight_lbs", 1).over(prev_weight_window)) * 100
         ).otherwise(None)
     )
+    
+    # Weight change over approximately 14 days.
+    # Self-join to find the nearest weight entry 10-18 days before each row,
+    # picking the one closest to exactly 14 days.
+    _wt_ref = weight_daily.select(
+        F.col("patientid").alias("_p14"),
+        F.col("local_date").alias("_d14"),
+        F.col("weight_lbs").alias("_w14")
+    )
+    weight_daily = weight_daily.join(
+        _wt_ref,
+        (F.col("patientid") == F.col("_p14")) &
+        (F.datediff(F.col("local_date"), F.col("_d14")).between(10, 18)),
+        "left"
+    )
+    _rank_14d = Window.partitionBy("patientid", "local_date").orderBy(
+        F.abs(F.datediff(F.col("local_date"), F.col("_d14")) - 14)
+    )
+    weight_daily = (weight_daily
+        .withColumn("_r14", F.row_number().over(_rank_14d))
+        .filter(F.col("_r14") == 1)
+        .drop("_r14", "_p14", "_d14"))
+    weight_daily = weight_daily.withColumn(
+        "weight_change_lbs_14d",
+        F.when(F.col("_w14").isNotNull(), F.col("weight_lbs") - F.col("_w14"))
+    ).withColumn(
+        "weight_change_pct_14d",
+        F.when((F.col("_w14").isNotNull()) & (F.col("_w14") > 0),
+               ((F.col("weight_lbs") - F.col("_w14")) / F.col("_w14")) * 100)
+    ).drop("_w14")
     
     # Flag: weight logged today
     weight_daily = weight_daily.withColumn(
@@ -682,6 +785,8 @@ def create_weight_features() -> DataFrame:
         "weight_lbs",
         "weight_lbs_delta",
         "weight_change_pct",
+        "weight_change_lbs_14d",
+        "weight_change_pct_14d",
         "days_since_last_weight",
         "weight_logged_today",
         "has_weight_goal",
@@ -722,6 +827,8 @@ def create_food_features() -> DataFrame:
                    "observationstatus"
                ))
     
+    # Prune to lookback window before any per-row processing
+    food_df = filter_lookback(food_df, "observationdatetime")
     # Apply timezone and filter
     food_df = add_local_date(food_df, "observationdatetime")
     food_df = filter_active_records(food_df, "observationstatus")
@@ -866,7 +973,7 @@ def _merge_sleep_intervals(pdf):
 
     if pdf.empty:
         return pd.DataFrame([{
-            'patientid': str(patientid),
+            'patientid': patientid,
             'local_date': local_date,
             'sleep_duration_hours': 0.0,
             'sleep_rating': avg_rating,
@@ -921,6 +1028,9 @@ def create_sleep_features() -> DataFrame:
                     "observationstatus",
                     "sleeprating"
                 ))
+
+    # Prune to lookback window before expensive timezone conversion
+    sleep_df = filter_lookback(sleep_df, "startdatetime")
 
     # Apply timezone offset to get local timestamps, then derive local_date from enddatetime
     # (sleep counts for the day it ended — when the patient woke up)
@@ -1034,6 +1144,8 @@ def create_medication_features() -> DataFrame:
                 )
                 .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset"))
     
+    # Prune to lookback window before any per-row processing
+    admin_df = filter_lookback(admin_df, "administrationdate")
     # Apply timezone and filter to taken medications (statusid=1 means taken)
     admin_df = add_local_date(admin_df, "administrationdate")
     admin_df = admin_df.filter(F.col("statusid") == 1)
@@ -1240,6 +1352,9 @@ def create_journal_features() -> DataFrame:
     journal_df = (spark.read.table(get_table_path("journal"))
                   .select(F.col("userid").alias("patientid"), "createddatetime"))
     
+    # Prune to lookback window
+    journal_df = filter_lookback(journal_df, "createddatetime")
+
     journal_df = journal_df.withColumn(
         "local_date", F.to_date("createddatetime")
     )
@@ -1278,6 +1393,11 @@ def create_grocery_features() -> DataFrame:
     grocery_df = (spark.read.table(get_table_path("grocery"))
                   .select("patientid", "entrydatetimeinmillis"))
     
+    # Prune to lookback window (entrydatetimeinmillis is epoch milliseconds)
+    grocery_df = grocery_df.filter(
+        F.to_date(F.from_unixtime(F.col("entrydatetimeinmillis") / 1000)) >= F.lit(str(_start_date))
+    )
+
     grocery_df = grocery_df.withColumn(
         "local_date",
         F.to_date(F.from_unixtime(F.col("entrydatetimeinmillis") / 1000))
@@ -1308,6 +1428,8 @@ def create_action_plan_features() -> DataFrame:
     action_plan_df = (spark.read.table(get_table_path("action_plan"))
                       .select("patientid", "statusid", "createddate", "timezoneoffset"))
     
+    # Prune to lookback window before any per-row processing
+    action_plan_df = filter_lookback(action_plan_df, "createddate")
     action_plan_df = add_local_date(action_plan_df, "createddate")
     
     # Filter out deleted plans
@@ -1412,6 +1534,9 @@ def create_exercise_video_features() -> DataFrame:
     video_df = (spark.read.table(get_table_path("exercise_video"))
                 .select("patientid", "createddate", "modifieddate", "statusid"))
     
+    # Prune to lookback window (modifieddate is the event date for completions)
+    video_df = video_df.filter(F.col("modifieddate") >= F.lit(str(_start_date)))
+
     # Use modifieddate as the indicator of when the video was completed
     # (status changes happen on modification)
     video_df = video_df.withColumn(
@@ -1490,6 +1615,14 @@ def create_exercise_program_features() -> DataFrame:
                   .select("patientid", "statusid", "activateddatetime", 
                           "createddate", "modifieddate"))
     
+    # Prune to lookback window — keep any record where activation or modification
+    # falls within the window (program_summary below reads a separate copy for
+    # patient-level state and is intentionally unfiltered).
+    program_df = program_df.filter(
+        (F.col("activateddatetime") >= F.lit(str(_start_date))) |
+        (F.col("modifieddate") >= F.lit(str(_start_date)))
+    )
+
     # Create local dates for different events
     program_df = program_df.withColumn(
         "activation_date",
@@ -1689,18 +1822,16 @@ def create_glycemic_med_features():
         glycemic-lowering medication on that day (statusid = 1).
     """
 
-    source_catalog = _source_catalog
-
     # 1. Diabetes-class medication IDs
     medclass_df = (
-        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medclass")
+        spark.read.table(get_table_path("med_class"))
         .filter(F.col("_fivetran_deleted") == False)
         .filter(F.col("diabetesclass") == True)
         .select("medclassid")
     )
 
     glycemic_med_ids = (
-        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medication")
+        spark.read.table(get_table_path("medication"))
         .filter(F.col("_fivetran_deleted") == False)
         .select("medicationid", "medclassid")
         .join(medclass_df, "medclassid", "inner")
@@ -1710,7 +1841,7 @@ def create_glycemic_med_features():
 
     # 2. Active prescriptions for glycemic-lowering medications
     glycemic_rx = (
-        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medprescription")
+        spark.read.table(get_table_path("med_prescription"))
         .filter(F.col("_fivetran_deleted") == False)
         .filter(F.col("statusid") == 1)   # Active only
         .select("patientid", "prescriptionguid", "medicationid")
@@ -1727,13 +1858,15 @@ def create_glycemic_med_features():
 
     # 4. Daily flag: took a glycemic-lowering medication on this day
     admin_df = (
-        spark.read.table(f"{source_catalog}.trxdb_dsmbasedb_observation.medadministration")
+        spark.read.table(get_table_path("med_administration"))
         .filter(F.col("_fivetran_deleted") == False)
         .filter(F.col("statusid") == 1)   # Taken
         .select("patientid", "prescriptionguid", "administrationdate",
                 "administrationtimezoneoffset")
         .withColumnRenamed("administrationtimezoneoffset", "timezoneoffset")
     )
+    # Prune to lookback window before timezone conversion
+    admin_df = filter_lookback(admin_df, "administrationdate")
     admin_df = add_local_date(admin_df, "administrationdate")
 
     glycemic_daily_df = (
@@ -1808,7 +1941,9 @@ def add_column_comments(table_path: str) -> None:
         ("weight_lbs",             "[observation.elogweightentry] Body weight recorded on this day (lbs)."),
         ("weight_lbs_delta",       "[observation.elogweightentry] Change in weight vs. the previous recorded entry (lbs)."),
         ("weight_change_pct",      "[observation.elogweightentry] Percentage change in weight vs. previous entry."),
-        ("days_since_last_weight", "[observation.elogweightentry] Calendar days elapsed since the most recent weight entry."),
+        ("days_since_last_weight", "[observation.elogweightentry] Calendar days from _feature_date to patient's most recent weight log on or before that date."),
+        ("weight_change_lbs_14d", "[observation.elogweightentry] Absolute change in weight (lbs) from ~14 days ago (nearest entry 10-18 days back). NULL if no entry in that window."),
+        ("weight_change_pct_14d", "[observation.elogweightentry] Percentage change in weight from ~14 days ago. NULL if no entry in that window."),
         ("weight_logged_today",    "[observation.elogweightentry] 1 if at least one weight reading was logged on this day."),
         ("has_weight_goal",        "[observation.weightgoal] 1 if patient has an active weight goal."),
         ("weight_goal_type",       "[observation.weightgoal] Goal type: 'lose', 'gain', or 'maintain' (from weightgoal.type)."),
@@ -1923,8 +2058,10 @@ def add_column_comments(table_path: str) -> None:
                                      "(e.g. ['FOOD_LOG_MEAL','SLEEP_INCREASE_DURATION']). Computed from feature flags."),
 
         # ── Pipeline Metadata ─────────────────────────────────────────────────
-        ("created_at",      "[pipeline] Timestamp when this feature row was written to the Gold table."),
-        ("feature_version", "[pipeline] Version identifier for the feature engineering logic applied to this row."),
+        ("created_at",       "[pipeline] Timestamp when this feature row was first written to the Gold table. Preserved across re-runs."),
+        ("last_modified_at", "[pipeline] Timestamp of the most recent write to this row (equals created_at on first run)."),
+        ("overwrite_count",  "[pipeline] Number of times this (patientid, report_date) partition has been recomputed. 0 = original write."),
+        ("feature_version",  "[pipeline] Version identifier for the feature engineering logic applied to this row."),
     ]
 
     print("\n📝 Applying column-level comments...")
@@ -2079,8 +2216,11 @@ def create_gold_feature_table() -> DataFrame:
     # Rename local_date to report_date for clarity
     gold_df = gold_df.withColumnRenamed("local_date", "report_date")
     
-    # Add metadata columns
-    gold_df = gold_df.withColumn("created_at", F.current_timestamp())
+    # Add metadata columns.
+    # created_at / last_modified_at / overwrite_count are resolved in
+    # execute_feature_store_creation() so they correctly carry forward
+    # the original creation time across re-runs.
+    gold_df = gold_df.withColumn("last_modified_at", F.current_timestamp())
     gold_df = gold_df.withColumn("feature_version", F.lit("3.0"))  # Updated with Journey, Exercise Video, Exercise Program
     
     print("  ✓ All features joined")
@@ -2355,19 +2495,44 @@ def execute_feature_store_creation():
     # Step 2: Add eligibility flags
     gold_df = add_eligibility_flags(gold_df)
     
-    # Step 3: Filter to recent data if incremental
-    if CONFIG["processing"]["incremental"]:
-        lookback = CONFIG["processing"]["lookback_window_days"]
-        cutoff_date = F.date_sub(F.current_date(), lookback)
-        gold_df = gold_df.filter(F.col("report_date") >= cutoff_date)
-        print(f"\n📅 Filtered to last {lookback} days")
-    
-    # Step 4: Get row count
-    row_count = gold_df.count()
-    print(f"\n📊 Total rows in feature table: {row_count:,}")
-    
-    # Step 5: Write to Delta table
+    # Step 3: Filter to yesterday only.
+    # The 35-day source window is needed so Spark Window functions (rolling averages,
+    # day-over-day deltas, etc.) have enough history to compute correctly.  But the
+    # LLM pipeline always reads the single row where report_date = _feature_date
+    # (yesterday), so that is the only row we need to persist in the Gold table.
+    gold_df = gold_df.filter(F.col("report_date") == F.lit(str(_feature_date)))
+    print(f"\n📅 Filtered to feature date: {_feature_date}")
+
+    # Step 3b: Resolve audit metadata.
+    # On the very first run for a partition, created_at = now and overwrite_count = 0.
+    # On re-runs, created_at is preserved from the existing row and overwrite_count
+    # is incremented so we can tell how many times a partition has been recomputed.
     gold_table_path = get_gold_table_path()
+    try:
+        existing_meta = spark.sql(f"""
+            SELECT patientid, created_at AS _existing_created_at,
+                   overwrite_count AS _existing_overwrite_count
+            FROM   {gold_table_path}
+            WHERE  report_date = '{_feature_date}'
+        """)
+        gold_df = gold_df.join(existing_meta, "patientid", "left")
+        gold_df = gold_df.withColumn(
+            "created_at",
+            F.coalesce(F.col("_existing_created_at"), F.current_timestamp())
+        ).withColumn(
+            "overwrite_count",
+            F.coalesce(F.col("_existing_overwrite_count") + F.lit(1), F.lit(0))
+        ).drop("_existing_created_at", "_existing_overwrite_count")
+        print("  ✓ Existing metadata merged (created_at preserved, overwrite_count incremented)")
+    except Exception:
+        # Table doesn't exist yet — first run.
+        gold_df = gold_df.withColumn("created_at", F.current_timestamp())
+        gold_df = gold_df.withColumn("overwrite_count", F.lit(0))
+        print("  ✓ First run — created_at and overwrite_count initialised")
+
+    # Step 4 / 5: Write first, then count from the written partition.
+    # Doing count() before write triggered a full computation pass; counting
+    # from the written partition reads Delta metadata and is essentially free.
     print(f"\n💾 Writing to: {gold_table_path}")
     
     # Ensure schema exists
@@ -2375,20 +2540,27 @@ def execute_feature_store_creation():
     schema = CONFIG["gold_table"]["schema"]
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
     
-    # Write with merge logic for idempotency
+    # Dynamic partition overwrite: only replaces the report_date partition being written.
+    # Existing partitions (previous days) are untouched, making each daily run idempotent.
     (gold_df.write
      .format("delta")
-     .mode("overwrite")  # Change to "append" or add merge logic for production
-     .option("overwriteSchema", "true")
+     .mode("overwrite")
+     .option("partitionOverwriteMode", "dynamic")
+     .option("mergeSchema", "true")
      .partitionBy(CONFIG["processing"]["partition_by"])
      .saveAsTable(gold_table_path))
     
     print("  ✓ Feature table written successfully")
+
+    row_count = spark.sql(f"""
+        SELECT COUNT(*) FROM {gold_table_path} WHERE report_date = '{_feature_date}'
+    """).collect()[0][0]
+    print(f"\n📊 Patients with features for {_feature_date}: {row_count:,}")
     
-    # Step 6: Optimize table
-    print("\n⚡ Optimizing table for serving performance...")
-    spark.sql(f"OPTIMIZE {gold_table_path} ZORDER BY (patientid)")
-    print("  ✓ Table optimized")
+    # Step 6: Optimize only the new partition (not the entire table)
+    print("\n⚡ Optimizing new partition for serving performance...")
+    spark.sql(f"OPTIMIZE {gold_table_path} WHERE report_date = '{_feature_date}' ZORDER BY (patientid)")
+    print("  ✓ Partition optimized")
     
     # Step 7: Add column-level comments (lineage + description)
     add_column_comments(gold_table_path)
@@ -2412,11 +2584,6 @@ def execute_feature_store_creation():
     print("="*80)
     print(f"\nTable: {gold_table_path}")
     print(f"Rows: {row_count:,}")
-    print("\nNext steps:")
-    print("1. Review feature table schema and sample data")
-    print("2. Create feature lookup for model serving")
-    print("3. Build LLM selection logic using eligibility flags")
-    print("4. Deploy as Databricks Model Serving endpoint")
     
     return gold_df
 
