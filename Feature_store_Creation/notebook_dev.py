@@ -83,6 +83,7 @@ CONFIG: Dict[str, Any] = {
         "exercise_video": f"{_source_catalog}.trxdb_dsmbasedb_user.curatedvideositemdetail",
         "exercise_program": f"{_source_catalog}.trxdb_dsmbasedb_user.curatedvideosprogramdetail",
         "user_focus": f"{_source_catalog}.trxdb_dsmbasedb_user.customizemyappdetails",
+        "active_users": f"{_source_catalog}.trxdb_dsmbasedb_user.userdetail_view",
     },
     
     # Target Gold Layer
@@ -2100,6 +2101,30 @@ print("✓ Column-comment function created")
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC ## 10b. Active Patient Roster
+
+# COMMAND ----------
+
+def get_active_patients() -> DataFrame:
+    """
+    Returns a DataFrame of active patient IDs from the userdetail_view table.
+    Active = statusid 1 (Active) and not soft-deleted by Fivetran.
+    """
+    active_users_table = CONFIG["source_tables"]["active_users"]
+    df = spark.sql(f"""
+        SELECT CAST(userid AS STRING) AS patientid
+        FROM   {active_users_table}
+        WHERE  statusid = 1
+          AND  _fivetran_deleted = false
+    """)
+    count = df.count()
+    print(f"✓ Active patient roster: {count:,} patients from {active_users_table}")
+    return df
+
+print("✓ Active patient roster function created")
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## 11. Master Feature Assembly - Create Gold Table
 
 # COMMAND ----------
@@ -2226,6 +2251,13 @@ def create_gold_feature_table() -> DataFrame:
         "glycemic_med_adherent",
         F.coalesce(F.col("glycemic_med_adherent"), F.lit(False))
     )
+
+    # ---- Scaffold: ensure every active patient has a row for _feature_date ----
+    # Patients who logged nothing today will have all-null feature columns.
+    active_roster = get_active_patients()
+    scaffold = active_roster.withColumn("local_date", F.to_date(F.lit(str(_feature_date))))
+    gold_df = gold_df.join(scaffold, ["patientid", "local_date"], "full_outer")
+    print("  ✓ Active-patient scaffold applied")
 
     # Rename local_date to report_date for clarity
     gold_df = gold_df.withColumnRenamed("local_date", "report_date")

@@ -75,7 +75,7 @@ resources:
         - task_key: feature_store_creation
           existing_cluster_id: "${var.cluster_id}"
           notebook_task:
-            notebook_path: ./Feature_store_Creation/notebook.py
+            notebook_path: ./Feature_store_Creation/notebook_dev.py
             base_parameters:
               source_catalog:  "${var.source_catalog}"
               gold_catalog:    "${var.gold_catalog}"
@@ -107,6 +107,7 @@ targets:
     workspace:
       host: https://adb-2008955168844352.12.azuredatabricks.net
       root_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+      file_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
     variables:
       source_catalog:   bronz_als_prod
       gold_catalog:     bronz_als_azuat2
@@ -117,6 +118,23 @@ targets:
       output_table_name: simon_healthy_habits_insights
       src_path:         /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src
       cluster_id:       "0220-155354-j83f24u8"
+
+  dev2:
+    mode: development
+    workspace:
+      host: https://adb-7405618747820435.15.azuredatabricks.net/
+      root_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+      file_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+    variables:
+      source_catalog:   bronz_als_prod
+      gold_catalog:     bronz_als_azuat2
+      gold_schema:      llm
+      gold_table_name:  user_daily_health_habits
+      output_catalog:   bronz_als_azuat2
+      output_schema:    llm
+      output_table_name: simon_healthy_habits_insights
+      src_path:         /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src
+      cluster_id:       "0423-191231-8xyhfgu8"
 
   prod:
     mode: production

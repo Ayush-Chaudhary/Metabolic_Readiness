@@ -33,7 +33,7 @@ dbutils.widgets.text("output_catalog",       "bronz_als_azuat2",                
 dbutils.widgets.text("output_schema",        "llm",                                    "Output Schema")
 dbutils.widgets.text("output_table_name",    "simon_healthy_habits_insights",          "Output Table Name")
 dbutils.widgets.text("insight_date",         "",                                       "Insight Date (YYYY-MM-DD, blank=today)")
-dbutils.widgets.text("src_path",             "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/files/src", "Source Path")
+dbutils.widgets.text("src_path",             "/Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness/src", "Source Path")
 dbutils.widgets.text("llm_endpoint",         "llama-3-3-70b",                                             "LLM Endpoint Name")
 dbutils.widgets.text("patient_ids",          "",                                                                                  "Patient IDs (comma-separated, blank=all)")
 
@@ -287,6 +287,110 @@ print(f"✓ Found {total_patients} patients with feature data for {feature_date_
 
 # COMMAND ----------
 # MAGIC %md
+# MAGIC ## 6b. Identify 7-Day Inactive Patients (Template Shortcut)
+
+# COMMAND ----------
+
+# Activity-indicator columns: if ALL of these are null/0 for 7 consecutive days,
+# the patient is considered inactive and gets a template insight (no LLM call).
+ACTIVITY_INDICATORS = [
+    "glucose_reading_count", "daily_step_count", "active_minutes",
+    "sleep_entry_count", "total_food_entries", "meds_taken_count",
+    "meditation_count", "journal_entry_count", "grocery_entry_count",
+    "action_plan_entries",
+]
+
+# Build a SQL condition: all indicators are null or 0
+_null_or_zero = " AND ".join(
+    f"(COALESCE({col}, 0) = 0)" for col in ACTIVITY_INDICATORS
+)
+_lookback_start = (_insight_date - timedelta(days=8)).strftime('%Y-%m-%d')  # 7 feature days
+
+print("Identifying 7-day inactive patients…")
+try:
+    inactive_df = spark.sql(f"""
+        WITH patient_activity AS (
+            SELECT patientid,
+                   COUNT(*) AS total_days,
+                   SUM(CASE WHEN {_null_or_zero} THEN 1 ELSE 0 END) AS inactive_days
+            FROM   {GOLD_TABLE}
+            WHERE  report_date >= '{_lookback_start}'
+              AND  report_date <= '{feature_date_str}'
+            GROUP BY patientid
+        )
+        SELECT patientid
+        FROM   patient_activity
+        WHERE  inactive_days = total_days
+          AND  total_days >= 7
+    """)
+    inactive_patient_set = {row["patientid"] for row in inactive_df.collect()}
+except Exception as e:
+    print(f"  Warning: could not identify inactive patients ({e}) — treating all as active")
+    inactive_patient_set = set()
+
+# Split patient lists
+inactive_patient_ids = [pid for pid in patient_ids if pid in inactive_patient_set]
+active_patient_ids   = [pid for pid in patient_ids if pid not in inactive_patient_set]
+
+print(f"  ✓ Active patients (LLM):   {len(active_patient_ids):,}")
+print(f"  ✓ Inactive patients (template): {len(inactive_patient_ids):,}")
+
+# ----------------------------------------------------------
+# Build template pool from past "Ready" insights
+# ----------------------------------------------------------
+COLD_START_TEMPLATES = [
+    "Great to see you here today! Take a moment today to explore the app. Check out the Explore section for tips on healthy habits you can start building.",
+    "Hey there! Today is a great day to take a small step toward better health. Browse the Explore section to discover new ways to support your wellness goals.",
+    "Hi there! Every day is a fresh start. Explore the app today to find resources and tips that can help you build healthy habits at your own pace.",
+    "Hi! Your health journey is always here for you. Take a few minutes today to explore what the app has to offer. There are great resources waiting for you.",
+    "Good to see you! Small steps lead to big changes. Why not explore a new section of the app today? You might find something that inspires your next healthy habit.",
+]
+
+print("Building template insight pool…")
+template_pool: List[str] = []
+try:
+    template_rows = spark.sql(f"""
+        SELECT DISTINCT insight
+        FROM   {OUTPUT_TABLE}
+        WHERE  score_name = 'Ready'
+        LIMIT  50
+    """).collect()
+    template_pool = [row["insight"] for row in template_rows if row["insight"]]
+except Exception as e:
+    print(f"  Warning: could not query past insights ({e})")
+
+if not template_pool:
+    template_pool = COLD_START_TEMPLATES
+    print(f"  ✓ Using {len(template_pool)} cold-start templates (no past 'Ready' insights found)")
+else:
+    print(f"  ✓ Loaded {len(template_pool)} template insights from past 'Ready' outputs")
+
+# ----------------------------------------------------------
+# Assign template insights to inactive patients
+# ----------------------------------------------------------
+import random
+
+template_results = []
+for pid in inactive_patient_ids:
+    template_msg = random.choice(template_pool)
+    template_results.append({
+        "patient_id"           : pid,
+        "insight_date"         : insight_date_str,
+        "insight"              : template_msg,
+        "score_name"           : "Ready",
+        "generated_at"         : datetime.now(tz=None).isoformat(),
+        "rating_description"   : "You're ready to start building healthy habits!",
+        "character_count"      : len(template_msg),
+        "word_count"           : len(template_msg.split()),
+        "positive_actions_used": ["app_login"],
+        "opportunity_used"     : "explore_browse",
+    })
+
+if template_results:
+    print(f"  ✓ Assigned template insights to {len(template_results)} inactive patients")
+
+# COMMAND ----------
+# MAGIC %md
 # MAGIC ## 7. Batch Generate Insights
 
 # COMMAND ----------
@@ -434,7 +538,7 @@ def process_patient(patient_id: str):
         "insight_date"         : insight_date_str,
         "insight"              : gen["message"],
         "score_name"           : selected.daily_rating,
-        "generated_at"         : datetime.utcnow().isoformat(),
+        "generated_at"         : datetime.now(tz=None).isoformat(),
         "rating_description"   : selected.rating_description,
         "character_count"      : gen.get("character_count", len(gen["message"])),
         "word_count"           : len(gen["message"].split()),
@@ -444,32 +548,41 @@ def process_patient(patient_id: str):
     return result_row, None
 
 # ----------------------------------------------------------
-# 7d. Run LLM calls concurrently
+# 7d. Run LLM calls concurrently (active patients only)
 # ----------------------------------------------------------
+total_llm_patients = len(active_patient_ids)
 completed = 0
-with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-    future_to_pid = {executor.submit(process_patient, pid): pid for pid in patient_ids}
+if active_patient_ids:
+    print(f"Running LLM insight generation for {total_llm_patients} active patients…")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_pid = {executor.submit(process_patient, pid): pid for pid in active_patient_ids}
 
-    for future in as_completed(future_to_pid):
-        pid = future_to_pid[future]
-        completed += 1
-        try:
-            result_row, error = future.result()
-        except Exception as exc:
-            failed.append({"patient_id": pid, "error": str(exc), "trace": traceback.format_exc()})
-            result_row, error = None, None
+        for future in as_completed(future_to_pid):
+            pid = future_to_pid[future]
+            completed += 1
+            try:
+                result_row, error = future.result()
+            except Exception as exc:
+                failed.append({"patient_id": pid, "error": str(exc), "trace": traceback.format_exc()})
+                result_row, error = None, None
 
-        if error:
-            failed.append(error)
-        elif result_row:
-            results.append(result_row)
-            history_batch.append(result_row)
+            if error:
+                failed.append(error)
+            elif result_row:
+                results.append(result_row)
+                history_batch.append(result_row)
 
-        if completed % 50 == 0 or completed == total_patients:
-            pct = round(completed / total_patients * 100)
-            print(f"  Progress: {completed}/{total_patients} ({pct}%)  |  failures so far: {len(failed)}")
+            if completed % 50 == 0 or completed == total_llm_patients:
+                pct = round(completed / total_llm_patients * 100)
+                print(f"  Progress: {completed}/{total_llm_patients} ({pct}%)  |  failures so far: {len(failed)}")
+else:
+    print("No active patients to generate LLM insights for.")
 
-print(f"\n✓ Generation complete — {len(results)} succeeded, {len(failed)} failed")
+# Merge template results for inactive patients into the output
+results.extend(template_results)
+history_batch.extend(template_results)
+
+print(f"\n✓ Generation complete — {len(results)} total ({completed} LLM + {len(template_results)} template), {len(failed)} failed")
 
 # ----------------------------------------------------------
 # 7e. Batch-write all history rows in a single MERGE (replaces N×M individual MERGEs)
