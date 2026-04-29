@@ -2255,6 +2255,9 @@ def create_gold_feature_table() -> DataFrame:
     # ---- Scaffold: ensure every active patient has a row for _feature_date ----
     # Patients who logged nothing today will have all-null feature columns.
     active_roster = get_active_patients()
+    # Cast patientid to match gold_df's type (source tables use BIGINT, roster uses STRING)
+    gold_pid_type = gold_df.schema["patientid"].dataType
+    active_roster = active_roster.withColumn("patientid", F.col("patientid").cast(gold_pid_type))
     scaffold = active_roster.withColumn("local_date", F.to_date(F.lit(str(_feature_date))))
     gold_df = gold_df.join(scaffold, ["patientid", "local_date"], "full_outer")
     print("  ✓ Active-patient scaffold applied")
@@ -2554,13 +2557,14 @@ def execute_feature_store_creation():
     # On re-runs, created_at is preserved from the existing row and overwrite_count
     # is incremented so we can tell how many times a partition has been recomputed.
     gold_table_path = get_gold_table_path()
+    table_exists = False
     try:
         existing_meta = spark.sql(f"""
             SELECT patientid, created_at AS _existing_created_at,
                    overwrite_count AS _existing_overwrite_count
             FROM   {gold_table_path}
             WHERE  report_date = '{_feature_date}'
-        """)
+        """).dropDuplicates(["patientid"])
         gold_df = gold_df.join(existing_meta, "patientid", "left")
         gold_df = gold_df.withColumn(
             "created_at",
@@ -2569,6 +2573,7 @@ def execute_feature_store_creation():
             "overwrite_count",
             F.coalesce(F.col("_existing_overwrite_count") + F.lit(1), F.lit(0))
         ).drop("_existing_created_at", "_existing_overwrite_count")
+        table_exists = True
         print("  ✓ Existing metadata merged (created_at preserved, overwrite_count incremented)")
     except Exception:
         # Table doesn't exist yet — first run.
@@ -2586,15 +2591,24 @@ def execute_feature_store_creation():
     schema = CONFIG["gold_table"]["schema"]
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
     
-    # Dynamic partition overwrite: only replaces the report_date partition being written.
-    # Existing partitions (previous days) are untouched, making each daily run idempotent.
-    (gold_df.write
-     .format("delta")
-     .mode("overwrite")
-     .option("partitionOverwriteMode", "dynamic")
-     .option("mergeSchema", "true")
-     .partitionBy(CONFIG["processing"]["partition_by"])
-     .saveAsTable(gold_table_path))
+    # Use replaceWhere for reliable partition overwrite on Delta tables.
+    # The previous .option("partitionOverwriteMode", "dynamic") was silently
+    # ignored (it's a session-level config, not a DataFrameWriter option),
+    # causing data to accumulate instead of being replaced on re-runs.
+    if table_exists:
+        (gold_df.write
+         .format("delta")
+         .mode("overwrite")
+         .option("replaceWhere", f"report_date = '{_feature_date}'")
+         .option("mergeSchema", "true")
+         .saveAsTable(gold_table_path))
+    else:
+        (gold_df.write
+         .format("delta")
+         .mode("overwrite")
+         .option("mergeSchema", "true")
+         .partitionBy(CONFIG["processing"]["partition_by"])
+         .saveAsTable(gold_table_path))
     
     print("  ✓ Feature table written successfully")
 

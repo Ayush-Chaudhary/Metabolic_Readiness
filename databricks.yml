@@ -121,7 +121,8 @@ targets:
     default: true
     workspace:
       host: https://adb-7405618747820435.15.azuredatabricks.net
-      root_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/SimonHealthyHabits
+      root_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
+      file_path: /Workspace/Users/achaudhary@welldocinc.com/Welldoc_4_0/Metabolic_Readiness
     variables:
       source_catalog:   bronz_als_prod
       gold_catalog:     bronz_als_azuat2
